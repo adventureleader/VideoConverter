@@ -131,8 +131,10 @@ if [ "$SYSTEM_INSTALL" = true ]; then
     # Security: Use a directory under /var/lib instead of /tmp to avoid
     # /tmp-based symlink attacks and tmpwatch cleanup issues
     mkdir -p /var/lib/video-converter/work
-    chown "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/video-converter/work
-    # Security: Restrict work directory permissions
+    chown -R "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/video-converter
+    # Security: Parent directory allows owner to access subdirectories
+    chmod 750 /var/lib/video-converter
+    # Work directory is owner-only (contains videos during conversion)
     chmod 700 /var/lib/video-converter/work
 else
     mkdir -p ~/.local/var/log/video-converter
