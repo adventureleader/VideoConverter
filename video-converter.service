@@ -4,10 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=kb3kvq
-Group=kb3kvq
-WorkingDirectory=/home/kb3kvq/Documents/ClaudeProjects/VideoConverter
-ExecStart=/usr/bin/python3 /home/kb3kvq/Documents/ClaudeProjects/VideoConverter/video_converter_daemon.py /home/kb3kvq/Documents/ClaudeProjects/VideoConverter/config.yaml
+WorkingDirectory=/opt/video-converter
+ExecStart=/usr/bin/python3 /opt/video-converter/video_converter_daemon.py /opt/video-converter/config.yaml
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal

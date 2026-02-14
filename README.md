@@ -1,6 +1,6 @@
 # Video Converter Daemon
 
-Automatically discovers and converts video files from a remote server (nas01) to .m4v format.
+Automatically discovers and converts video files to .m4v format. Designed to run locally on nas01 for efficient processing without network transfers.
 
 ## Features
 
@@ -15,17 +15,37 @@ Automatically discovers and converts video files from a remote server (nas01) to
 
 - Python 3.6+
 - FFmpeg
-- rsync
-- SSH access to nas01 (configured with key-based authentication)
+- Runs on nas01 (the server with the video files)
 
 ## Installation
 
-1. **Install system dependencies** (if not already installed):
+### From Development Machine
+
+1. **Deploy to nas01**:
    ```bash
-   sudo apt install ffmpeg rsync python3-pip
+   ./deploy.sh
    ```
 
-2. **Run the installation script**:
+2. **SSH to nas01 and complete setup**:
+   ```bash
+   ssh nas01
+   cd /opt/video-converter
+   ```
+
+### On nas01
+
+1. **Install system dependencies** (if not already installed):
+   ```bash
+   sudo apt install ffmpeg python3-pip
+   pip3 install --user PyYAML
+   ```
+
+2. **Edit the configuration file** `config.yaml`:
+   - Set the directories to scan for videos
+   - Adjust conversion quality settings
+   - Configure other options as needed
+
+3. **Run the installation script**:
    ```bash
    # For user service (recommended)
    ./install.sh
@@ -33,11 +53,6 @@ Automatically discovers and converts video files from a remote server (nas01) to
    # For system-wide service
    sudo ./install.sh
    ```
-
-3. **Edit the configuration file** `config.yaml`:
-   - Set the directories to scan on nas01
-   - Adjust conversion quality settings
-   - Configure other options as needed
 
 4. **Start the daemon**:
    ```bash
@@ -54,13 +69,11 @@ Automatically discovers and converts video files from a remote server (nas01) to
 
 Edit `config.yaml` to customize the daemon behavior:
 
-### Remote Server Settings
+### Directories to Monitor
 ```yaml
-remote:
-  host: "nas01"
-  directories:
-    - "/path/to/videos1"
-    - "/path/to/videos2"
+directories:
+  - "/path/to/videos1"
+  - "/path/to/videos2"
 ```
 
 ### Conversion Quality
@@ -139,11 +152,6 @@ Press Ctrl+C to stop.
 
 ## Troubleshooting
 
-### Check SSH Connection
-```bash
-ssh nas01 "echo 'Connection successful'"
-```
-
 ### Check FFmpeg
 ```bash
 ffmpeg -version
@@ -183,13 +191,12 @@ VideoConverter/
 
 ## How It Works
 
-1. **Discovery**: Periodically scans configured directories on nas01 for video files
+1. **Discovery**: Periodically scans configured directories for video files
 2. **Filtering**: Checks if files need processing (not already converted, not in progress)
-3. **Download**: Downloads video file from nas01 to local work directory
-4. **Convert**: Uses FFmpeg to convert to .m4v with configured settings
-5. **Upload**: Uploads converted file back to nas01 (same directory as original)
-6. **Cleanup**: Removes local temporary files, optionally deletes original
-7. **Track**: Records processed files to avoid re-processing
+3. **Convert**: Uses FFmpeg to convert to .m4v in a temporary directory
+4. **Move**: Moves converted file to same directory as original
+5. **Cleanup**: Removes temporary files, optionally deletes original
+6. **Track**: Records processed files to avoid re-processing
 
 ## Performance Tips
 

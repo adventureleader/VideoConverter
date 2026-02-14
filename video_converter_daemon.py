@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Video Converter Daemon
-Automatically discovers and converts video files from remote server to .m4v format
+Automatically discovers and converts video files to .m4v format
+Designed to run locally on nas01
 """
 
 import os
@@ -11,6 +12,7 @@ import yaml
 import logging
 import subprocess
 import hashlib
+import shutil
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -81,56 +83,52 @@ class VideoConverterDaemon:
         self.logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
 
-    def get_file_hash(self, remote_path: str) -> str:
-        """Generate unique hash for remote file"""
-        return hashlib.md5(remote_path.encode()).hexdigest()
+    def get_file_hash(self, file_path: str) -> str:
+        """Generate unique hash for file path"""
+        return hashlib.md5(file_path.encode()).hexdigest()
 
-    def discover_videos(self) -> List[str]:
-        """Discover video files on remote server"""
-        remote_host = self.config['remote']['host']
-        directories = self.config['remote']['directories']
+    def discover_videos(self) -> List[Path]:
+        """Discover video files in configured directories"""
+        directories = self.config['directories']
         extensions = self.config['processing']['include_extensions']
         exclude_patterns = self.config['processing']['exclude_patterns']
 
         all_videos = []
 
         for directory in directories:
-            self.logger.debug(f"Scanning {remote_host}:{directory}")
+            dir_path = Path(directory)
 
-            # Build find command to discover video files
-            ext_conditions = " -o ".join([f"-iname '*.{ext}'" for ext in extensions])
-            exclude_conditions = " ".join([f"! -path '{pattern}'" for pattern in exclude_patterns])
+            if not dir_path.exists():
+                self.logger.warning(f"Directory does not exist: {directory}")
+                continue
 
-            find_cmd = f"find '{directory}' -type f \\( {ext_conditions} \\) {exclude_conditions} 2>/dev/null"
-            ssh_cmd = f"ssh {remote_host} \"{find_cmd}\""
+            self.logger.debug(f"Scanning {directory}")
 
             try:
-                result = subprocess.run(
-                    ssh_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
+                # Find all video files recursively
+                for ext in extensions:
+                    pattern = f"**/*.{ext}"
+                    for video_file in dir_path.glob(pattern):
+                        if video_file.is_file():
+                            # Check exclude patterns
+                            should_exclude = False
+                            for exclude_pattern in exclude_patterns:
+                                if video_file.match(exclude_pattern):
+                                    should_exclude = True
+                                    break
 
-                if result.returncode == 0:
-                    files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
-                    all_videos.extend(files)
-                    self.logger.debug(f"Found {len(files)} videos in {directory}")
-                else:
-                    self.logger.error(f"Error scanning {directory}: {result.stderr}")
+                            if not should_exclude:
+                                all_videos.append(video_file)
 
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"Timeout scanning {directory}")
             except Exception as e:
                 self.logger.error(f"Exception scanning {directory}: {e}")
 
         self.logger.info(f"Discovered {len(all_videos)} total video files")
         return all_videos
 
-    def should_process(self, remote_path: str) -> bool:
+    def should_process(self, video_path: Path) -> bool:
         """Check if file should be processed"""
-        file_hash = self.get_file_hash(remote_path)
+        file_hash = self.get_file_hash(str(video_path))
 
         # Skip if already processed
         if file_hash in self.processed_files:
@@ -141,88 +139,83 @@ class VideoConverterDaemon:
             return False
 
         # Skip if output already exists
-        if remote_path.lower().endswith('.m4v'):
+        output_path = video_path.with_suffix('.m4v')
+        if output_path.exists() and output_path != video_path:
+            self.logger.debug(f"Output already exists: {output_path}")
+            return False
+
+        # Skip if already .m4v
+        if video_path.suffix.lower() == '.m4v':
             return False
 
         return True
 
-    def convert_video(self, remote_path: str) -> bool:
+    def convert_video(self, video_path: Path) -> bool:
         """Convert a single video file"""
-        file_hash = self.get_file_hash(remote_path)
-        remote_host = self.config['remote']['host']
+        file_hash = self.get_file_hash(str(video_path))
         work_dir = Path(self.config['processing']['work_dir'])
 
         try:
             self.converting.add(file_hash)
-            self.logger.info(f"Starting conversion: {remote_path}")
+            self.logger.info(f"Starting conversion: {video_path}")
 
             # Generate output filename
-            input_path = Path(remote_path)
-            output_filename = input_path.stem + '.m4v'
-            local_input = work_dir / f"{file_hash}_input{input_path.suffix}"
-            local_output = work_dir / f"{file_hash}_output.m4v"
-            remote_output = str(input_path.parent / output_filename)
+            output_path = video_path.with_suffix('.m4v')
+            temp_output = work_dir / f"{file_hash}_output.m4v"
 
-            # Step 1: Download file
-            self.logger.info(f"Downloading {remote_path}")
-            rsync_cmd = [
-                'rsync', '-avz', '--progress',
-                f'{remote_host}:{remote_path}',
-                str(local_input)
-            ]
+            # Convert video
+            self.logger.info(f"Converting {video_path.name}")
+            ffmpeg_cmd = self.build_ffmpeg_command(video_path, temp_output)
 
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True)
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=None  # No timeout for video conversion
+            )
+
             if result.returncode != 0:
-                self.logger.error(f"Download failed: {result.stderr}")
+                self.logger.error(f"Conversion failed for {video_path}: {result.stderr}")
+                temp_output.unlink(missing_ok=True)
                 return False
 
-            # Step 2: Convert video
-            self.logger.info(f"Converting {input_path.name}")
-            ffmpeg_cmd = self.build_ffmpeg_command(local_input, local_output)
+            # Move converted file to final location
+            self.logger.info(f"Moving converted file to {output_path}")
+            shutil.move(str(temp_output), str(output_path))
 
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                self.logger.error(f"Conversion failed: {result.stderr}")
-                local_input.unlink(missing_ok=True)
-                return False
+            # Preserve timestamps
+            try:
+                stat = video_path.stat()
+                os.utime(output_path, (stat.st_atime, stat.st_mtime))
+            except Exception as e:
+                self.logger.warning(f"Could not preserve timestamps: {e}")
 
-            # Step 3: Upload converted file
-            self.logger.info(f"Uploading {output_filename}")
-            rsync_cmd = [
-                'rsync', '-avz', '--progress',
-                str(local_output),
-                f'{remote_host}:{remote_output}'
-            ]
-
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                self.logger.error(f"Upload failed: {result.stderr}")
-                local_input.unlink(missing_ok=True)
-                local_output.unlink(missing_ok=True)
-                return False
-
-            # Step 4: Delete original if configured
+            # Delete original if configured
             if not self.config['processing']['keep_original']:
-                self.logger.info(f"Deleting original: {remote_path}")
-                ssh_cmd = f"ssh {remote_host} 'rm \"{remote_path}\"'"
-                subprocess.run(ssh_cmd, shell=True, capture_output=True)
-
-            # Cleanup local files
-            local_input.unlink(missing_ok=True)
-            local_output.unlink(missing_ok=True)
+                self.logger.info(f"Deleting original: {video_path}")
+                try:
+                    video_path.unlink()
+                except Exception as e:
+                    self.logger.error(f"Failed to delete original: {e}")
 
             # Mark as processed
             self.processed_files.add(file_hash)
             self.save_processed_files()
 
-            self.logger.info(f"Successfully converted: {remote_path}")
+            self.logger.info(f"Successfully converted: {video_path}")
             return True
 
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Conversion timeout for {video_path}")
+            return False
         except Exception as e:
-            self.logger.error(f"Exception converting {remote_path}: {e}")
+            self.logger.error(f"Exception converting {video_path}: {e}", exc_info=True)
             return False
         finally:
             self.converting.discard(file_hash)
+            # Cleanup temp files
+            temp_output = work_dir / f"{file_hash}_output.m4v"
+            temp_output.unlink(missing_ok=True)
 
     def build_ffmpeg_command(self, input_path: Path, output_path: Path) -> List[str]:
         """Build FFmpeg command from configuration"""
@@ -246,7 +239,7 @@ class VideoConverterDaemon:
 
         return cmd
 
-    def process_batch(self, videos: List[str]):
+    def process_batch(self, videos: List[Path]):
         """Process a batch of videos with concurrent workers"""
         max_workers = self.config['daemon']['max_workers']
 
@@ -280,8 +273,7 @@ class VideoConverterDaemon:
 
         self.logger.info("Video Converter Daemon started")
         self.logger.info(f"Scan interval: {scan_interval} seconds")
-        self.logger.info(f"Remote host: {self.config['remote']['host']}")
-        self.logger.info(f"Monitoring directories: {self.config['remote']['directories']}")
+        self.logger.info(f"Monitoring directories: {self.config['directories']}")
 
         while self.running:
             try:

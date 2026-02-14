@@ -1,30 +1,40 @@
 # Quick Start Guide
 
-## 1. Install Dependencies
+## Deploy to nas01
+
+### 1. From Development Machine
 
 ```bash
-sudo apt install ffmpeg rsync python3-pip -y
+./deploy.sh
+```
+
+This copies all files to `/opt/video-converter` on nas01.
+
+### 2. SSH to nas01
+
+```bash
+ssh nas01
+cd /opt/video-converter
+```
+
+### 3. Install Dependencies
+
+```bash
+sudo apt install ffmpeg python3-pip -y
 pip3 install --user PyYAML
 ```
 
-## 2. Configure
+### 4. Configure
 
-Edit `config.yaml` and set your nas01 directories:
+Edit `config.yaml` and set your video directories:
 
 ```yaml
-remote:
-  directories:
-    - "/your/video/directory1"
-    - "/your/video/directory2"
+directories:
+  - "/your/video/directory1"
+  - "/your/video/directory2"
 ```
 
-## 3. Test Connection
-
-```bash
-ssh nas01 "ls -la"
-```
-
-## 4. Test Run (Optional)
+### 5. Test Run (Optional)
 
 Run manually to verify everything works:
 
@@ -34,13 +44,13 @@ python3 video_converter_daemon.py config.yaml
 
 Press Ctrl+C after it finds some videos.
 
-## 5. Install as Service
+### 6. Install as Service
 
 ```bash
 ./install.sh
 ```
 
-## 6. Start Service
+### 7. Start Service
 
 ```bash
 # User service (recommended)
@@ -56,13 +66,15 @@ journalctl --user -u video-converter -f
 ## Done!
 
 The daemon will now:
-- Scan nas01 every 5 minutes for videos
-- Convert up to 2 videos at a time
+- Scan directories every 5 minutes for videos
+- Convert up to 2 videos at a time (locally on nas01)
 - Save .m4v files to the same directory as originals
 - Keep original files (configurable)
 - Track processed files to avoid duplicates
 
-## Quick Commands
+No network transfers needed - everything happens locally on nas01!
+
+## Quick Commands (on nas01)
 
 ```bash
 # Status
@@ -80,6 +92,8 @@ systemctl --user restart video-converter
 # View logs
 journalctl --user -u video-converter -f
 
-# Disable
-systemctl --user disable video-converter
+# Or use the management script
+./manage.sh status
+./manage.sh follow
+./manage.sh stats
 ```
