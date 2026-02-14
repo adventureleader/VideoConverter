@@ -84,7 +84,12 @@ if [ "$SYSTEM_INSTALL" = true ]; then
     SERVICE_USER="videoconverter"
     if ! id "$SERVICE_USER" &>/dev/null; then
         echo "Creating dedicated service user: $SERVICE_USER"
-        useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+        # Check if group exists; if so, use it, otherwise create user+group
+        if getent group "$SERVICE_USER" &>/dev/null; then
+            useradd --system --no-create-home --shell /usr/sbin/nologin -g "$SERVICE_USER" "$SERVICE_USER"
+        else
+            useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+        fi
     else
         echo "[OK] Service user '$SERVICE_USER' already exists"
     fi
