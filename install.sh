@@ -43,23 +43,27 @@ else
     echo "✓ FFmpeg found: $(ffmpeg -version | head -n1)"
 fi
 
-# Check rsync
-if ! command -v rsync &> /dev/null; then
-    echo "WARNING: rsync is not installed"
-    echo "Please install rsync: sudo apt install rsync"
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-else
-    echo "✓ rsync found"
-fi
 
 # Install Python dependencies
 echo ""
 echo "Installing Python dependencies..."
-pip3 install --user -r requirements.txt
+
+# Try system package first (recommended for newer Ubuntu/Debian)
+if ! python3 -c "import yaml" 2>/dev/null; then
+    echo "PyYAML not found, attempting to install..."
+
+    # Try system package first
+    if command -v apt &> /dev/null; then
+        echo "Installing via apt (recommended)..."
+        sudo apt install -y python3-yaml
+    else
+        # Fallback to pip with --break-system-packages for externally-managed environments
+        echo "Installing via pip..."
+        pip3 install --user --break-system-packages PyYAML || pip3 install --user PyYAML
+    fi
+else
+    echo "✓ PyYAML already installed"
+fi
 
 # Create log directory
 echo ""
