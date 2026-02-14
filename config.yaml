@@ -1,0 +1,68 @@
+# Video Converter Daemon Configuration
+
+# Remote server settings
+remote:
+  host: "nas01"
+  user: null  # Will use current SSH config
+
+  # Directories on nas01 to scan for videos
+  directories:
+    - "/path/to/videos1"
+    - "/path/to/videos2"
+    # Add more directories as needed
+
+# Conversion settings
+conversion:
+  # Output format
+  format: "m4v"
+
+  # FFmpeg settings
+  codec: "libx264"
+  crf: 23  # Quality: 18-28 (lower = better quality, larger file)
+  preset: "medium"  # ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+  audio_codec: "aac"
+  audio_bitrate: "128k"
+
+  # Additional FFmpeg options
+  extra_options: []
+
+# Processing settings
+processing:
+  # Where to process files
+  mode: "local"  # "local" or "remote"
+
+  # Local working directory for downloads/conversions
+  work_dir: "/tmp/video_converter"
+
+  # After successful conversion
+  keep_original: true  # Set to false to delete originals
+
+  # File patterns to include (case-insensitive)
+  include_extensions:
+    - "avi"
+    - "mkv"
+    - "mov"
+    - "mp4"
+    - "flv"
+    - "wmv"
+    - "mpg"
+    - "mpeg"
+    - "m4v"
+
+  # Skip files that match these patterns
+  exclude_patterns:
+    - "*.converted.*"
+    - "*.converting.*"
+    - "*/.backup/*"
+
+# Daemon settings
+daemon:
+  # How often to scan for new files (seconds)
+  scan_interval: 300
+
+  # Maximum concurrent conversions
+  max_workers: 2
+
+  # Log file location
+  log_file: "/var/log/video-converter/daemon.log"
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
