@@ -92,6 +92,7 @@ After=network.target
 
 [Service]
 Type=simple
+User=125
 WorkingDirectory=$SCRIPT_DIR
 ExecStart=/usr/bin/python3 $SCRIPT_DIR/video_converter_daemon.py $SCRIPT_DIR/config.yaml
 Restart=on-failure
