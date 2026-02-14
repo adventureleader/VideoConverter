@@ -92,61 +92,46 @@ else
 fi
 
 # Determine the service user for system installs
-if [ "$SYSTEM_INSTALL" = true ]; then
-    # Use existing docker user/group
-    SERVICE_USER="docker"
-    SERVICE_GROUP="docker"
+# Use existing docker user/group for system service
+SERVICE_USER="docker"
+SERVICE_GROUP="docker"
 
-    # Verify docker user exists
-    if ! id "$SERVICE_USER" &>/dev/null; then
-        echo "ERROR: User '$SERVICE_USER' does not exist"
-        echo "Please install Docker or specify a different user"
-        exit 1
-    fi
-
-    if ! getent group "$SERVICE_GROUP" &>/dev/null; then
-        echo "ERROR: Group '$SERVICE_GROUP' does not exist"
-        exit 1
-    fi
-
-    echo "[OK] Using service user: $SERVICE_USER (group: $SERVICE_GROUP)"
-else
-    SERVICE_USER="$USER"
-    SERVICE_GROUP="$(id -gn)"
+# Verify docker user exists
+if ! id "$SERVICE_USER" &>/dev/null; then
+    echo "ERROR: User '$SERVICE_USER' does not exist"
+    echo "Please install Docker or specify a different user"
+    exit 1
 fi
+
+if ! getent group "$SERVICE_GROUP" &>/dev/null; then
+    echo "ERROR: Group '$SERVICE_GROUP' does not exist"
+    exit 1
+fi
+
+echo "[OK] Using service user: $SERVICE_USER (group: $SERVICE_GROUP)"
 
 # Set up directories
 echo ""
 echo "Setting up directories..."
-if [ "$SYSTEM_INSTALL" = true ]; then
-    # Set ownership of install directory to docker
-    chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$INSTALL_DIR"
-    chmod -R 750 "$INSTALL_DIR"
-    chmod 640 "$INSTALL_DIR/config.yaml"
+# Set ownership of install directory to docker
+chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$INSTALL_DIR"
+chmod -R 750 "$INSTALL_DIR"
+chmod 640 "$INSTALL_DIR/config.yaml"
 
-    mkdir -p /var/log/video-converter
-    chown "$SERVICE_USER":"$SERVICE_GROUP" /var/log/video-converter
-    # Security: Restrict log directory permissions (owner rwx, group rx, others none)
-    chmod 750 /var/log/video-converter
-    # Also create work directory for system service
-    # Security: Use a directory under /var/lib instead of /tmp to avoid
-    # /tmp-based symlink attacks and tmpwatch cleanup issues
-    mkdir -p /var/lib/video-converter/work
-    chown -R "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/video-converter
-    # Security: Parent directory allows owner to access subdirectories
-    chmod 750 /var/lib/video-converter
-    # Work directory is owner-only (contains videos during conversion)
-    chmod 700 /var/lib/video-converter/work
-else
-    mkdir -p ~/.local/var/log/video-converter
-    chmod 750 ~/.local/var/log/video-converter
-    # Create user work directory outside of /tmp
-    mkdir -p ~/.local/var/lib/video-converter/work
-    chmod 700 ~/.local/var/lib/video-converter/work
-    # Update config to use user directories
-    sed -i "s|/var/log/video-converter|$HOME/.local/var/log/video-converter|g" config.yaml
-    sed -i "s|/tmp/video_converter|$HOME/.local/var/lib/video-converter/work|g" config.yaml
-fi
+mkdir -p /var/log/video-converter
+chown "$SERVICE_USER":"$SERVICE_GROUP" /var/log/video-converter
+# Security: Restrict log directory permissions (owner rwx, group rx, others none)
+chmod 750 /var/log/video-converter
+
+# Create work directory
+# Security: Use a directory under /var/lib instead of /tmp to avoid
+# /tmp-based symlink attacks and tmpwatch cleanup issues
+mkdir -p /var/lib/video-converter/work
+chown -R "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/video-converter
+# Security: Parent directory allows owner to access subdirectories
+chmod 750 /var/lib/video-converter
+# Work directory is owner-only (contains videos during conversion)
+chmod 700 /var/lib/video-converter/work
 
 # Make daemon script executable (owner and group only)
 chmod 750 video_converter_daemon.py
@@ -163,10 +148,8 @@ TEMP_SERVICE_FILE="$(mktemp /tmp/video-converter.service.XXXXXX)"
 # Security: Ensure temp file is cleaned up on exit
 trap "rm -f '$TEMP_SERVICE_FILE'" EXIT
 
-# Create service file with correct paths
-if [ "$SYSTEM_INSTALL" = true ]; then
-    # System service
-    cat > "$TEMP_SERVICE_FILE" <<EOF
+# Create system service file with correct paths
+cat > "$TEMP_SERVICE_FILE" <<EOF
 [Unit]
 Description=Video Converter Daemon
 After=network.target
@@ -207,63 +190,20 @@ CPUQuota=80%
 [Install]
 WantedBy=multi-user.target
 EOF
-    # Security: Set restrictive permissions on the service file
-    chmod 644 "$TEMP_SERVICE_FILE"
-    mv "$TEMP_SERVICE_FILE" /etc/systemd/system/video-converter.service
-    systemctl daemon-reload
-    echo "[OK] System service installed"
-    echo ""
-    echo "To enable and start the service:"
-    echo "  sudo systemctl enable video-converter"
-    echo "  sudo systemctl start video-converter"
-    echo ""
-    echo "To check status:"
-    echo "  sudo systemctl status video-converter"
-    echo "  sudo journalctl -u video-converter -f"
-else
-    # User service
-    cat > "$TEMP_SERVICE_FILE" <<EOF
-[Unit]
-Description=Video Converter Daemon
-After=network.target
 
-[Service]
-Type=simple
-WorkingDirectory=$SCRIPT_DIR
-ExecStart=/usr/bin/python3 $SCRIPT_DIR/video_converter_daemon.py $SCRIPT_DIR/config.yaml
-Restart=on-failure
-RestartSec=30
-StandardOutput=journal
-StandardError=journal
-
-# Environment
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
-
-# Security hardening (user service subset)
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-
-[Install]
-WantedBy=default.target
-EOF
-    mkdir -p ~/.config/systemd/user
-    chmod 644 "$TEMP_SERVICE_FILE"
-    mv "$TEMP_SERVICE_FILE" ~/.config/systemd/user/video-converter.service
-    systemctl --user daemon-reload
-    echo "[OK] User service installed"
-    echo ""
-    echo "To enable and start the service:"
-    echo "  systemctl --user enable video-converter"
-    echo "  systemctl --user start video-converter"
-    echo ""
-    echo "To check status:"
-    echo "  systemctl --user status video-converter"
-    echo "  journalctl --user -u video-converter -f"
-fi
+# Security: Set restrictive permissions on the service file
+chmod 644 "$TEMP_SERVICE_FILE"
+mv "$TEMP_SERVICE_FILE" /etc/systemd/system/video-converter.service
+systemctl daemon-reload
+echo "[OK] System service installed"
+echo ""
+echo "To enable and start the service:"
+echo "  sudo systemctl enable video-converter"
+echo "  sudo systemctl start video-converter"
+echo ""
+echo "To check status:"
+echo "  sudo systemctl status video-converter"
+echo "  sudo journalctl -u video-converter -f"
 
 echo ""
 echo "=== Installation Complete ==="
