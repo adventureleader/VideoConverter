@@ -10,14 +10,15 @@ umask 0027
 echo "=== Video Converter Daemon Installation ==="
 echo ""
 
-# Check if running as root for system installation
-if [ "$EUID" -eq 0 ]; then
-    SYSTEM_INSTALL=true
-    echo "Running as root - will install as system service"
-else
-    SYSTEM_INSTALL=false
-    echo "Running as user - will install as user service"
+# Ensure running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: This script must be run as root"
+    echo "Usage: sudo ./install.sh"
+    exit 1
 fi
+
+SYSTEM_INSTALL=true
+echo "Running as root - installing system service"
 
 # Get the script directory (safely)
 SOURCE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
