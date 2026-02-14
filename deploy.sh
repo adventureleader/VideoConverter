@@ -1,7 +1,8 @@
 #!/bin/bash
 # Deploy Video Converter Daemon to nas01
 
-set -e
+# Security: Exit on error, undefined variables, and pipe failures
+set -euo pipefail
 
 REMOTE_HOST="nas01"
 REMOTE_DIR="~/video-converter"
@@ -11,7 +12,7 @@ echo ""
 
 # Create remote directory
 echo "Creating remote directory..."
-ssh $REMOTE_HOST "mkdir -p $REMOTE_DIR"
+ssh "$REMOTE_HOST" "mkdir -p $REMOTE_DIR"
 
 # Copy files
 echo "Copying files to nas01..."
@@ -20,7 +21,10 @@ rsync -avz --progress \
     --exclude='__pycache__' \
     --exclude='.claude' \
     --exclude='*.pyc' \
-    ./ $REMOTE_HOST:$REMOTE_DIR/
+    --exclude='.env' \
+    --exclude='*.key' \
+    --exclude='*.pem' \
+    ./ "$REMOTE_HOST":"$REMOTE_DIR"/
 
 echo ""
 echo "=== Deployment Complete ==="

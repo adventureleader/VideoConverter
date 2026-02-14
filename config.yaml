@@ -1,7 +1,14 @@
 # Video Converter Daemon Configuration
 # This daemon runs locally on nas01
+#
+# SECURITY NOTES:
+# - All directories must be absolute paths
+# - Codec, preset, and audio_codec are validated against allowlists at startup
+# - extra_options is disabled for security (prevents arbitrary ffmpeg flag injection)
+# - work_dir should NOT be under /tmp (symlink attack risk); use /var/lib/... instead
+# - The daemon follows symlinks only within configured directories
 
-# Directories to scan for videos
+# Directories to scan for videos (must be absolute paths)
 directories:
   - "/media"
   - "/mnt/smallmedia"
@@ -12,25 +19,26 @@ conversion:
   # Output format
   format: "m4v"
 
-  # FFmpeg settings
+  # FFmpeg settings (validated against allowlists)
   codec: "libx264"
-  crf: 23  # Quality: 18-28 (lower = better quality, larger file)
+  crf: 23  # Quality: 0-51 (lower = better quality, larger file; 18-28 recommended)
   preset: "medium"  # ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
   audio_codec: "aac"
   audio_bitrate: "128k"
 
-  # Additional FFmpeg options
+  # Additional FFmpeg options (DISABLED for security - add specific parameters above)
   extra_options: []
 
 # Processing settings
 processing:
   # Working directory for temporary files during conversion
-  work_dir: "/tmp/video_converter"
+  # Security: Use a dedicated directory outside /tmp to prevent symlink attacks
+  work_dir: "/var/lib/video-converter/work"
 
   # After successful conversion
   keep_original: true  # Set to false to delete originals
 
-  # File patterns to include (case-insensitive)
+  # File patterns to include (validated against known video extensions)
   include_extensions:
     - "avi"
     - "mkv"
@@ -50,12 +58,12 @@ processing:
 
 # Daemon settings
 daemon:
-  # How often to scan for new files (seconds)
+  # How often to scan for new files (seconds, minimum 30)
   scan_interval: 300
 
-  # Maximum concurrent conversions
+  # Maximum concurrent conversions (1-8)
   max_workers: 2
 
-  # Log file location
+  # Log file location (must be absolute path)
   log_file: "/var/log/video-converter/daemon.log"
-  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL

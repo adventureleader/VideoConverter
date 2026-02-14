@@ -1,12 +1,14 @@
 #!/bin/bash
 # Video Converter Daemon Management Script
 
+set -euo pipefail
+
 SERVICE_NAME="video-converter"
 CONFIG_FILE="config.yaml"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Check if using system or user service
-if systemctl list-units --full --all | grep -q "^$SERVICE_NAME.service"; then
+if systemctl list-units --full --all | grep -q "^${SERVICE_NAME}.service"; then
     SERVICE_TYPE="system"
     SYSTEMCTL_CMD="sudo systemctl"
     JOURNALCTL_CMD="sudo journalctl"
@@ -41,64 +43,71 @@ show_stats() {
     echo "=== Conversion Statistics ==="
     echo ""
 
+    # Determine work directory based on install type
+    if [ "$SERVICE_TYPE" = "system" ]; then
+        WORK_DIR="/var/lib/video-converter/work"
+    else
+        WORK_DIR="$HOME/.local/var/lib/video-converter/work"
+    fi
+
     # Count processed files
-    if [ -f /tmp/video_converter/processed.json ]; then
-        PROCESSED_COUNT=$(jq '. | length' /tmp/video_converter/processed.json 2>/dev/null || echo "0")
+    if [ -f "$WORK_DIR/processed.json" ]; then
+        PROCESSED_COUNT=$(jq '. | length' "$WORK_DIR/processed.json" 2>/dev/null || echo "0")
         echo "Total files processed: $PROCESSED_COUNT"
         echo ""
         echo "Recent conversions:"
-        $JOURNALCTL_CMD -u $SERVICE_NAME | grep "Successfully converted" | tail -5
+        $JOURNALCTL_CMD -u "$SERVICE_NAME" | grep "Successfully converted" | tail -5
     else
         echo "No processed files database found"
     fi
 
     echo ""
     echo "=== Current Status ==="
-    $SYSTEMCTL_CMD status $SERVICE_NAME --no-pager | grep -E "(Active:|Tasks:|Memory:|CPU:)"
+    $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager | grep -E "(Active:|Tasks:|Memory:|CPU:)" || true
 }
 
-case "$1" in
+case "${1:-}" in
     start)
         echo "Starting $SERVICE_TYPE service..."
-        $SYSTEMCTL_CMD start $SERVICE_NAME
+        $SYSTEMCTL_CMD start "$SERVICE_NAME"
         sleep 1
-        $SYSTEMCTL_CMD status $SERVICE_NAME --no-pager
+        $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager
         ;;
 
     stop)
         echo "Stopping $SERVICE_TYPE service..."
-        $SYSTEMCTL_CMD stop $SERVICE_NAME
+        $SYSTEMCTL_CMD stop "$SERVICE_NAME"
         ;;
 
     restart)
         echo "Restarting $SERVICE_TYPE service..."
-        $SYSTEMCTL_CMD restart $SERVICE_NAME
+        $SYSTEMCTL_CMD restart "$SERVICE_NAME"
         sleep 1
-        $SYSTEMCTL_CMD status $SERVICE_NAME --no-pager
+        $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager
         ;;
 
     status)
-        $SYSTEMCTL_CMD status $SERVICE_NAME --no-pager
+        $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager
         ;;
 
     logs)
-        $JOURNALCTL_CMD -u $SERVICE_NAME -n 50 --no-pager
+        $JOURNALCTL_CMD -u "$SERVICE_NAME" -n 50 --no-pager
         ;;
 
     follow)
         echo "Following logs (Ctrl+C to stop)..."
-        $JOURNALCTL_CMD -u $SERVICE_NAME -f
+        $JOURNALCTL_CMD -u "$SERVICE_NAME" -f
         ;;
 
     enable)
         echo "Enabling $SERVICE_TYPE service..."
-        $SYSTEMCTL_CMD enable $SERVICE_NAME
+        $SYSTEMCTL_CMD enable "$SERVICE_NAME"
         echo "Service will start automatically on boot"
         ;;
 
     disable)
         echo "Disabling $SERVICE_TYPE service..."
-        $SYSTEMCTL_CMD disable $SERVICE_NAME
+        $SYSTEMCTL_CMD disable "$SERVICE_NAME"
         echo "Service will not start automatically on boot"
         ;;
 
@@ -111,7 +120,13 @@ case "$1" in
         echo "All files will be considered unprocessed and may be re-converted."
         read -p "Are you sure? (yes/no): " CONFIRM
         if [ "$CONFIRM" = "yes" ]; then
-            rm -f /tmp/video_converter/processed.json
+            # Determine work directory based on install type
+            if [ "$SERVICE_TYPE" = "system" ]; then
+                WORK_DIR="/var/lib/video-converter/work"
+            else
+                WORK_DIR="$HOME/.local/var/lib/video-converter/work"
+            fi
+            rm -f "$WORK_DIR/processed.json"
             echo "Database reset complete"
         else
             echo "Cancelled"
@@ -129,7 +144,7 @@ case "$1" in
         read -p "Restart service to apply changes? (y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            $SYSTEMCTL_CMD restart $SERVICE_NAME
+            $SYSTEMCTL_CMD restart "$SERVICE_NAME"
             echo "Service restarted"
         fi
         ;;

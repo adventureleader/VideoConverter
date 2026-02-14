@@ -4,6 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=videoconverter
+Group=videoconverter
 WorkingDirectory=/opt/video-converter
 ExecStart=/usr/bin/python3 /opt/video-converter/video_converter_daemon.py /opt/video-converter/config.yaml
 Restart=on-failure
@@ -13,6 +15,25 @@ StandardError=journal
 
 # Environment
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+
+# Allow read-write to specific directories only
+ReadWritePaths=/var/log/video-converter /var/lib/video-converter
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=4G
+CPUQuota=80%
 
 [Install]
 WantedBy=multi-user.target

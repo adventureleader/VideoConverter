@@ -13,25 +13,62 @@ import logging
 import subprocess
 import hashlib
 import shutil
+import re
+import threading
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 import signal
 import json
+
+# --- Security: Allowed values for config validation ---
+ALLOWED_CODECS = frozenset([
+    'libx264', 'libx265', 'libvpx', 'libvpx-vp9', 'libaom-av1',
+    'copy', 'mpeg4', 'h264_nvenc', 'hevc_nvenc', 'h264_vaapi',
+])
+ALLOWED_AUDIO_CODECS = frozenset([
+    'aac', 'libmp3lame', 'libvorbis', 'libopus', 'copy', 'ac3', 'flac',
+])
+ALLOWED_PRESETS = frozenset([
+    'ultrafast', 'superfast', 'veryfast', 'faster', 'fast',
+    'medium', 'slow', 'slower', 'veryslow',
+])
+ALLOWED_LOG_LEVELS = frozenset(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
+ALLOWED_EXTENSIONS = frozenset([
+    'avi', 'mkv', 'mov', 'mp4', 'flv', 'wmv', 'mpg', 'mpeg', 'm4v',
+    'webm', 'ts', 'vob', 'ogv', '3gp', 'divx',
+])
+# Regex: audio bitrate must be digits followed by 'k' or 'M'
+AUDIO_BITRATE_RE = re.compile(r'^\d{1,4}[kM]$')
+# Max concurrent workers to prevent resource exhaustion
+MAX_WORKERS_LIMIT = 8
+# Max conversion timeout: 24 hours (prevents zombie processes)
+MAX_CONVERSION_TIMEOUT = 86400
+# Max file size for conversion: 100 GB
+MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024 * 1024
+
+
+class ConfigValidationError(Exception):
+    """Raised when configuration values fail validation."""
+    pass
+
 
 class VideoConverterDaemon:
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize the daemon with configuration"""
         self.running = True
         self.config = self.load_config(config_path)
+        self.validate_config()
         self.setup_logging()
         self.processed_files = self.load_processed_files()
         self.converting = set()
+        self._converting_lock = threading.Lock()
+        self._processed_lock = threading.Lock()
 
-        # Create work directory
+        # Security: Create work directory with restrictive permissions
         work_dir = Path(self.config['processing']['work_dir'])
-        work_dir.mkdir(parents=True, exist_ok=True)
+        work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Register signal handlers
         signal.signal(signal.SIGTERM, self.handle_shutdown)
@@ -41,8 +78,119 @@ class VideoConverterDaemon:
 
     def load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file"""
-        with open(config_path, 'r') as f:
+        # Security: Resolve to absolute path and verify it is a regular file
+        config_resolved = Path(config_path).resolve()
+        if not config_resolved.is_file():
+            raise FileNotFoundError(f"Config file not found: {config_resolved}")
+        with open(config_resolved, 'r') as f:
             return yaml.safe_load(f)
+
+    def validate_config(self):
+        """Validate all configuration values against allowlists.
+
+        This prevents injection through malicious config values that end up
+        in subprocess arguments or file paths.
+        """
+        conv = self.config.get('conversion', {})
+        proc = self.config.get('processing', {})
+        daemon = self.config.get('daemon', {})
+
+        # Validate codec
+        codec = conv.get('codec', '')
+        if codec not in ALLOWED_CODECS:
+            raise ConfigValidationError(
+                f"Invalid codec '{codec}'. Allowed: {sorted(ALLOWED_CODECS)}"
+            )
+
+        # Validate audio codec
+        audio_codec = conv.get('audio_codec', '')
+        if audio_codec not in ALLOWED_AUDIO_CODECS:
+            raise ConfigValidationError(
+                f"Invalid audio_codec '{audio_codec}'. Allowed: {sorted(ALLOWED_AUDIO_CODECS)}"
+            )
+
+        # Validate preset
+        preset = conv.get('preset', '')
+        if preset not in ALLOWED_PRESETS:
+            raise ConfigValidationError(
+                f"Invalid preset '{preset}'. Allowed: {sorted(ALLOWED_PRESETS)}"
+            )
+
+        # Validate CRF (integer 0-51)
+        crf = conv.get('crf', 23)
+        if not isinstance(crf, int) or crf < 0 or crf > 51:
+            raise ConfigValidationError(
+                f"Invalid crf '{crf}'. Must be integer 0-51."
+            )
+
+        # Validate audio bitrate format
+        audio_bitrate = conv.get('audio_bitrate', '')
+        if not AUDIO_BITRATE_RE.match(str(audio_bitrate)):
+            raise ConfigValidationError(
+                f"Invalid audio_bitrate '{audio_bitrate}'. Must match pattern like '128k' or '2M'."
+            )
+
+        # Security: Reject extra_options entirely -- these are unconstrained
+        # CLI arguments that could be used to inject arbitrary ffmpeg flags
+        # (e.g., -filter_complex with lavfi exploits, -f to overwrite arbitrary files).
+        extra_options = conv.get('extra_options', [])
+        if extra_options:
+            raise ConfigValidationError(
+                "extra_options is disabled for security. Define specific "
+                "conversion parameters in the configuration schema instead."
+            )
+
+        # Validate log level
+        log_level = daemon.get('log_level', 'INFO')
+        if log_level not in ALLOWED_LOG_LEVELS:
+            raise ConfigValidationError(
+                f"Invalid log_level '{log_level}'. Allowed: {sorted(ALLOWED_LOG_LEVELS)}"
+            )
+
+        # Validate max_workers (bounded)
+        max_workers = daemon.get('max_workers', 2)
+        if not isinstance(max_workers, int) or max_workers < 1 or max_workers > MAX_WORKERS_LIMIT:
+            raise ConfigValidationError(
+                f"Invalid max_workers '{max_workers}'. Must be 1-{MAX_WORKERS_LIMIT}."
+            )
+
+        # Validate scan_interval (at least 30 seconds to prevent busy-loop)
+        scan_interval = daemon.get('scan_interval', 300)
+        if not isinstance(scan_interval, (int, float)) or scan_interval < 30:
+            raise ConfigValidationError(
+                f"Invalid scan_interval '{scan_interval}'. Must be >= 30 seconds."
+            )
+
+        # Validate include_extensions against allowlist
+        extensions = proc.get('include_extensions', [])
+        for ext in extensions:
+            if ext.lower() not in ALLOWED_EXTENSIONS:
+                raise ConfigValidationError(
+                    f"Invalid extension '{ext}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}"
+                )
+
+        # Validate directories exist and are absolute paths
+        directories = self.config.get('directories', [])
+        for d in directories:
+            dir_path = Path(d)
+            if not dir_path.is_absolute():
+                raise ConfigValidationError(
+                    f"Directory '{d}' must be an absolute path."
+                )
+
+        # Validate work_dir is an absolute path
+        work_dir = proc.get('work_dir', '')
+        if not Path(work_dir).is_absolute():
+            raise ConfigValidationError(
+                f"work_dir '{work_dir}' must be an absolute path."
+            )
+
+        # Validate log_file is an absolute path
+        log_file = daemon.get('log_file', '')
+        if not Path(log_file).is_absolute():
+            raise ConfigValidationError(
+                f"log_file '{log_file}' must be an absolute path."
+            )
 
     def setup_logging(self):
         """Configure logging"""
@@ -50,7 +198,7 @@ class VideoConverterDaemon:
         log_dir = os.path.dirname(log_file)
 
         if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
+            os.makedirs(log_dir, exist_ok=True, mode=0o750)
 
         log_level = getattr(logging, self.config['daemon']['log_level'])
 
@@ -69,23 +217,65 @@ class VideoConverterDaemon:
         db_file = Path(self.config['processing']['work_dir']) / 'processed.json'
         if db_file.exists():
             with open(db_file, 'r') as f:
-                return set(json.load(f))
+                data = json.load(f)
+                # Security: Validate that loaded data is a list of strings
+                if not isinstance(data, list):
+                    self.logger.warning("processed.json has invalid format, resetting")
+                    return set()
+                for item in data:
+                    if not isinstance(item, str) or not re.match(r'^[a-f0-9]{32}$', item):
+                        self.logger.warning("processed.json contains invalid hash, resetting")
+                        return set()
+                return set(data)
         return set()
 
     def save_processed_files(self):
-        """Save list of processed files"""
+        """Save list of processed files atomically to prevent corruption"""
         db_file = Path(self.config['processing']['work_dir']) / 'processed.json'
-        with open(db_file, 'w') as f:
-            json.dump(list(self.processed_files), f, indent=2)
+        tmp_file = db_file.with_suffix('.json.tmp')
+
+        with self._processed_lock:
+            try:
+                # Security: Write to temp file first, then atomic rename
+                fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(list(self.processed_files), f, indent=2)
+                os.replace(str(tmp_file), str(db_file))
+            except Exception:
+                # Clean up temp file on failure
+                tmp_file.unlink(missing_ok=True)
+                raise
 
     def handle_shutdown(self, signum, frame):
         """Handle shutdown signals gracefully"""
-        self.logger.info(f"Received signal {signum}, shutting down...")
+        self.logger.info("Received signal %d, shutting down...", signum)
         self.running = False
 
     def get_file_hash(self, file_path: str) -> str:
-        """Generate unique hash for file path"""
-        return hashlib.md5(file_path.encode()).hexdigest()
+        """Generate unique hash for file path using SHA-256"""
+        # Security: Use SHA-256 instead of MD5 (MD5 is cryptographically broken)
+        return hashlib.sha256(file_path.encode()).hexdigest()
+
+    def _is_safe_path(self, path: Path, allowed_dirs: List[str]) -> bool:
+        """Verify a path resolves within one of the allowed directories.
+
+        This prevents symlink-based path traversal attacks where a symlink
+        inside a watched directory points outside of it.
+        """
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, ValueError):
+            return False
+
+        for allowed_dir in allowed_dirs:
+            try:
+                allowed_resolved = Path(allowed_dir).resolve(strict=True)
+                # Check that the resolved path is under the allowed directory
+                resolved.relative_to(allowed_resolved)
+                return True
+            except (ValueError, OSError):
+                continue
+        return False
 
     def discover_videos(self) -> List[Path]:
         """Discover video files in configured directories"""
@@ -99,31 +289,52 @@ class VideoConverterDaemon:
             dir_path = Path(directory)
 
             if not dir_path.exists():
-                self.logger.warning(f"Directory does not exist: {directory}")
+                self.logger.warning("Directory does not exist: %s", directory)
                 continue
 
-            self.logger.debug(f"Scanning {directory}")
+            # Security: Verify the directory itself resolves safely
+            try:
+                resolved_dir = dir_path.resolve(strict=True)
+                if not resolved_dir.is_dir():
+                    self.logger.warning("Path is not a directory: %s", directory)
+                    continue
+            except OSError:
+                self.logger.warning("Cannot resolve directory: %s", directory)
+                continue
+
+            self.logger.debug("Scanning %s", directory)
 
             try:
                 # Find all video files recursively
                 for ext in extensions:
                     pattern = f"**/*.{ext}"
                     for video_file in dir_path.glob(pattern):
-                        if video_file.is_file():
-                            # Check exclude patterns
-                            should_exclude = False
-                            for exclude_pattern in exclude_patterns:
-                                if video_file.match(exclude_pattern):
-                                    should_exclude = True
-                                    break
+                        # Security: Only process regular files (not symlinks to outside dirs)
+                        if not video_file.is_file():
+                            continue
 
-                            if not should_exclude:
-                                all_videos.append(video_file)
+                        # Security: Verify resolved path stays within allowed directories
+                        if not self._is_safe_path(video_file, directories):
+                            self.logger.warning(
+                                "Skipping file outside allowed directories "
+                                "(possible symlink traversal): %s", video_file
+                            )
+                            continue
+
+                        # Check exclude patterns
+                        should_exclude = False
+                        for exclude_pattern in exclude_patterns:
+                            if video_file.match(exclude_pattern):
+                                should_exclude = True
+                                break
+
+                        if not should_exclude:
+                            all_videos.append(video_file)
 
             except Exception as e:
-                self.logger.error(f"Exception scanning {directory}: {e}")
+                self.logger.error("Exception scanning %s: %s", directory, e)
 
-        self.logger.info(f"Discovered {len(all_videos)} total video files")
+        self.logger.info("Discovered %d total video files", len(all_videos))
         return all_videos
 
     def should_process(self, video_path: Path) -> bool:
@@ -134,18 +345,35 @@ class VideoConverterDaemon:
         if file_hash in self.processed_files:
             return False
 
-        # Skip if currently converting
-        if file_hash in self.converting:
-            return False
+        # Skip if currently converting (thread-safe check)
+        with self._converting_lock:
+            if file_hash in self.converting:
+                return False
 
         # Skip if output already exists
         output_path = video_path.with_suffix('.m4v')
         if output_path.exists() and output_path != video_path:
-            self.logger.debug(f"Output already exists: {output_path}")
+            self.logger.debug("Output already exists: %s", output_path)
             return False
 
         # Skip if already .m4v
         if video_path.suffix.lower() == '.m4v':
+            return False
+
+        # Security: Skip files that are too large (resource exhaustion prevention)
+        try:
+            file_size = video_path.stat().st_size
+            if file_size > MAX_FILE_SIZE_BYTES:
+                self.logger.warning(
+                    "Skipping file exceeding size limit (%d bytes): %s",
+                    file_size, video_path
+                )
+                return False
+            if file_size == 0:
+                self.logger.warning("Skipping empty file: %s", video_path)
+                return False
+        except OSError as e:
+            self.logger.warning("Cannot stat file %s: %s", video_path, e)
             return False
 
         return True
@@ -156,31 +384,62 @@ class VideoConverterDaemon:
         work_dir = Path(self.config['processing']['work_dir'])
 
         try:
-            self.converting.add(file_hash)
-            self.logger.info(f"Starting conversion: {video_path}")
+            with self._converting_lock:
+                self.converting.add(file_hash)
+
+            self.logger.info("Starting conversion: %s", video_path)
+
+            # Security: Re-verify the file still exists and is safe before conversion
+            if not video_path.is_file():
+                self.logger.error("File no longer exists: %s", video_path)
+                return False
+
+            if not self._is_safe_path(video_path, self.config['directories']):
+                self.logger.error(
+                    "File path resolution changed (possible TOCTOU attack): %s",
+                    video_path
+                )
+                return False
 
             # Generate output filename
             output_path = video_path.with_suffix('.m4v')
             temp_output = work_dir / f"{file_hash}_output.m4v"
 
+            # Security: Verify temp output is within work_dir
+            try:
+                temp_output.resolve().relative_to(work_dir.resolve())
+            except ValueError:
+                self.logger.error("Temp output path escapes work directory")
+                return False
+
             # Convert video
-            self.logger.info(f"Converting {video_path.name}")
+            self.logger.info("Converting %s", video_path.name)
             ffmpeg_cmd = self.build_ffmpeg_command(video_path, temp_output)
 
             result = subprocess.run(
                 ffmpeg_cmd,
                 capture_output=True,
                 text=True,
-                timeout=None  # No timeout for video conversion
+                # Security: Set a timeout to prevent zombie processes
+                timeout=MAX_CONVERSION_TIMEOUT,
             )
 
             if result.returncode != 0:
-                self.logger.error(f"Conversion failed for {video_path}: {result.stderr}")
+                # Security: Truncate stderr to prevent log flooding from malicious files
+                stderr_truncated = result.stderr[:2000] if result.stderr else "(no stderr)"
+                self.logger.error(
+                    "Conversion failed for %s: %s", video_path, stderr_truncated
+                )
                 temp_output.unlink(missing_ok=True)
                 return False
 
+            # Security: Verify the temp output is a regular file before moving
+            if not temp_output.is_file():
+                self.logger.error("Temp output is not a regular file: %s", temp_output)
+                return False
+
             # Move converted file to final location
-            self.logger.info(f"Moving converted file to {output_path}")
+            self.logger.info("Moving converted file to %s", output_path)
             shutil.move(str(temp_output), str(output_path))
 
             # Preserve timestamps
@@ -188,54 +447,61 @@ class VideoConverterDaemon:
                 stat = video_path.stat()
                 os.utime(output_path, (stat.st_atime, stat.st_mtime))
             except Exception as e:
-                self.logger.warning(f"Could not preserve timestamps: {e}")
+                self.logger.warning("Could not preserve timestamps: %s", e)
 
             # Delete original if configured
             if not self.config['processing']['keep_original']:
-                self.logger.info(f"Deleting original: {video_path}")
+                self.logger.info("Deleting original: %s", video_path)
                 try:
                     video_path.unlink()
                 except Exception as e:
-                    self.logger.error(f"Failed to delete original: {e}")
+                    self.logger.error("Failed to delete original: %s", e)
 
             # Mark as processed
-            self.processed_files.add(file_hash)
+            with self._processed_lock:
+                self.processed_files.add(file_hash)
             self.save_processed_files()
 
-            self.logger.info(f"Successfully converted: {video_path}")
+            self.logger.info("Successfully converted: %s", video_path)
             return True
 
         except subprocess.TimeoutExpired:
-            self.logger.error(f"Conversion timeout for {video_path}")
+            self.logger.error(
+                "Conversion timeout (%ds) for %s", MAX_CONVERSION_TIMEOUT, video_path
+            )
             return False
         except Exception as e:
-            self.logger.error(f"Exception converting {video_path}: {e}", exc_info=True)
+            self.logger.error("Exception converting %s: %s", video_path, e, exc_info=True)
             return False
         finally:
-            self.converting.discard(file_hash)
+            with self._converting_lock:
+                self.converting.discard(file_hash)
             # Cleanup temp files
             temp_output = work_dir / f"{file_hash}_output.m4v"
             temp_output.unlink(missing_ok=True)
 
     def build_ffmpeg_command(self, input_path: Path, output_path: Path) -> List[str]:
-        """Build FFmpeg command from configuration"""
+        """Build FFmpeg command from validated configuration.
+
+        Security notes:
+        - All config values are validated in validate_config() at startup.
+        - Arguments are passed as a list (no shell=True), preventing shell injection.
+        - extra_options is disabled to prevent arbitrary flag injection.
+        - The -nostdin flag prevents ffmpeg from reading stdin (avoids hanging).
+        """
         config = self.config['conversion']
 
         cmd = [
             'ffmpeg',
+            '-nostdin',      # Security: prevent ffmpeg from reading stdin
             '-i', str(input_path),
             '-c:v', config['codec'],
             '-crf', str(config['crf']),
             '-preset', config['preset'],
             '-c:a', config['audio_codec'],
             '-b:a', config['audio_bitrate'],
+            '-y', str(output_path),
         ]
-
-        # Add extra options
-        cmd.extend(config.get('extra_options', []))
-
-        # Add output file
-        cmd.extend(['-y', str(output_path)])
 
         return cmd
 
@@ -250,7 +516,9 @@ class VideoConverterDaemon:
             self.logger.debug("No new videos to process")
             return
 
-        self.logger.info(f"Processing {len(to_process)} videos with {max_workers} workers")
+        self.logger.info(
+            "Processing %d videos with %d workers", len(to_process), max_workers
+        )
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(self.convert_video, video): video
@@ -261,19 +529,19 @@ class VideoConverterDaemon:
                 try:
                     success = future.result()
                     if success:
-                        self.logger.info(f"Completed: {video}")
+                        self.logger.info("Completed: %s", video)
                     else:
-                        self.logger.warning(f"Failed: {video}")
+                        self.logger.warning("Failed: %s", video)
                 except Exception as e:
-                    self.logger.error(f"Exception processing {video}: {e}")
+                    self.logger.error("Exception processing %s: %s", video, e)
 
     def run(self):
         """Main daemon loop"""
         scan_interval = self.config['daemon']['scan_interval']
 
         self.logger.info("Video Converter Daemon started")
-        self.logger.info(f"Scan interval: {scan_interval} seconds")
-        self.logger.info(f"Monitoring directories: {self.config['directories']}")
+        self.logger.info("Scan interval: %d seconds", scan_interval)
+        self.logger.info("Monitoring directories: %s", self.config['directories'])
 
         while self.running:
             try:
@@ -285,7 +553,9 @@ class VideoConverterDaemon:
                 # Process videos
                 self.process_batch(videos)
 
-                self.logger.info(f"Scan cycle complete. Sleeping for {scan_interval} seconds")
+                self.logger.info(
+                    "Scan cycle complete. Sleeping for %d seconds", scan_interval
+                )
 
                 # Sleep with interruption check
                 sleep_elapsed = 0
@@ -294,7 +564,7 @@ class VideoConverterDaemon:
                     sleep_elapsed += 5
 
             except Exception as e:
-                self.logger.error(f"Error in main loop: {e}", exc_info=True)
+                self.logger.error("Error in main loop: %s", e, exc_info=True)
                 time.sleep(30)
 
         self.logger.info("Video Converter Daemon stopped")
@@ -303,12 +573,18 @@ def main():
     """Main entry point"""
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
 
-    if not os.path.exists(config_path):
-        print(f"Error: Config file not found: {config_path}")
+    # Security: Resolve to absolute path
+    config_resolved = Path(config_path).resolve()
+    if not config_resolved.is_file():
+        print(f"Error: Config file not found: {config_resolved}")
         sys.exit(1)
 
-    daemon = VideoConverterDaemon(config_path)
-    daemon.run()
+    try:
+        daemon = VideoConverterDaemon(str(config_resolved))
+        daemon.run()
+    except ConfigValidationError as e:
+        print(f"Configuration error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
