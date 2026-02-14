@@ -78,21 +78,26 @@ fi
 
 # Determine the service user for system installs
 if [ "$SYSTEM_INSTALL" = true ]; then
-    # Security: Create a dedicated unprivileged system user instead of using
-    # a hardcoded UID. Using a fixed UID like 125 is fragile and may collide
-    # with existing users/services on different systems.
-    SERVICE_USER="videoconverter"
+    # Use existing docker user/group
+    SERVICE_USER="docker"
+    SERVICE_GROUP="docker"
+
+    # Verify docker user exists
     if ! id "$SERVICE_USER" &>/dev/null; then
-        echo "Creating dedicated service user: $SERVICE_USER"
-        # Check if group exists; if so, use it, otherwise create user+group
-        if getent group "$SERVICE_USER" &>/dev/null; then
-            useradd --system --no-create-home --shell /usr/sbin/nologin -g "$SERVICE_USER" "$SERVICE_USER"
-        else
-            useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
-        fi
-    else
-        echo "[OK] Service user '$SERVICE_USER' already exists"
+        echo "ERROR: User '$SERVICE_USER' does not exist"
+        echo "Please install Docker or specify a different user"
+        exit 1
     fi
+
+    if ! getent group "$SERVICE_GROUP" &>/dev/null; then
+        echo "ERROR: Group '$SERVICE_GROUP' does not exist"
+        exit 1
+    fi
+
+    echo "[OK] Using service user: $SERVICE_USER (group: $SERVICE_GROUP)"
+else
+    SERVICE_USER="$USER"
+    SERVICE_GROUP="$(id -gn)"
 fi
 
 # Create log directory
@@ -100,14 +105,14 @@ echo ""
 echo "Creating log directory..."
 if [ "$SYSTEM_INSTALL" = true ]; then
     mkdir -p /var/log/video-converter
-    chown "$SERVICE_USER":"$SERVICE_USER" /var/log/video-converter
+    chown "$SERVICE_USER":"$SERVICE_GROUP" /var/log/video-converter
     # Security: Restrict log directory permissions (owner rwx, group rx, others none)
     chmod 750 /var/log/video-converter
     # Also create work directory for system service
     # Security: Use a directory under /var/lib instead of /tmp to avoid
     # /tmp-based symlink attacks and tmpwatch cleanup issues
     mkdir -p /var/lib/video-converter/work
-    chown "$SERVICE_USER":"$SERVICE_USER" /var/lib/video-converter/work
+    chown "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/video-converter/work
     # Security: Restrict work directory permissions
     chmod 700 /var/lib/video-converter/work
 else
@@ -147,7 +152,7 @@ After=network.target
 [Service]
 Type=simple
 User=$SERVICE_USER
-Group=$SERVICE_USER
+Group=$SERVICE_GROUP
 WorkingDirectory=$SCRIPT_DIR
 ExecStart=/usr/bin/python3 $SCRIPT_DIR/video_converter_daemon.py $SCRIPT_DIR/config.yaml
 Restart=on-failure
