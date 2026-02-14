@@ -20,6 +20,17 @@ fi
 SYSTEM_INSTALL=true
 echo "Running as root - installing system service"
 
+# Check if daemon is running and stop it
+echo ""
+echo "Checking for running daemon..."
+if systemctl is-active --quiet video-converter; then
+    echo "[WARNING] video-converter service is running, stopping it..."
+    systemctl stop video-converter
+    echo "[OK] Service stopped"
+else
+    echo "[OK] Service not running"
+fi
+
 # Get the script directory (safely)
 SOURCE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SOURCE_DIR"
