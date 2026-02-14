@@ -20,14 +20,28 @@ else
 fi
 
 # Get the script directory (safely)
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR"
+SOURCE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SOURCE_DIR"
 
 # Security: Verify expected files exist (prevent running from wrong directory)
-if [ ! -f "$SCRIPT_DIR/video_converter_daemon.py" ] || [ ! -f "$SCRIPT_DIR/config.yaml" ]; then
-    echo "ERROR: Required files not found in $SCRIPT_DIR"
+if [ ! -f "$SOURCE_DIR/video_converter_daemon.py" ] || [ ! -f "$SOURCE_DIR/config.yaml" ]; then
+    echo "ERROR: Required files not found in $SOURCE_DIR"
     echo "       Ensure video_converter_daemon.py and config.yaml exist."
     exit 1
+fi
+
+# For system installs, copy to /opt/video-converter and update SCRIPT_DIR
+if [ "$EUID" -eq 0 ]; then
+    INSTALL_DIR="/opt/video-converter"
+    echo "Installing to: $INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
+    cp -f "$SOURCE_DIR"/*.py "$INSTALL_DIR/"
+    cp -f "$SOURCE_DIR"/*.yaml "$INSTALL_DIR/"
+    cp -f "$SOURCE_DIR"/*.sh "$INSTALL_DIR/"
+    cp -f "$SOURCE_DIR"/*.txt "$INSTALL_DIR/"
+    SCRIPT_DIR="$INSTALL_DIR"
+else
+    SCRIPT_DIR="$SOURCE_DIR"
 fi
 
 # Check dependencies
@@ -100,10 +114,15 @@ else
     SERVICE_GROUP="$(id -gn)"
 fi
 
-# Create log directory
+# Set up directories
 echo ""
-echo "Creating log directory..."
+echo "Setting up directories..."
 if [ "$SYSTEM_INSTALL" = true ]; then
+    # Set ownership of install directory to docker
+    chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$INSTALL_DIR"
+    chmod -R 750 "$INSTALL_DIR"
+    chmod 640 "$INSTALL_DIR/config.yaml"
+
     mkdir -p /var/log/video-converter
     chown "$SERVICE_USER":"$SERVICE_GROUP" /var/log/video-converter
     # Security: Restrict log directory permissions (owner rwx, group rx, others none)
