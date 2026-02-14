@@ -70,7 +70,12 @@ echo ""
 echo "Creating log directory..."
 if [ "$SYSTEM_INSTALL" = true ]; then
     mkdir -p /var/log/video-converter
-    chown $SUDO_USER:$SUDO_USER /var/log/video-converter
+    chown 125:125 /var/log/video-converter
+    chmod 755 /var/log/video-converter
+    # Also create work directory for system service
+    mkdir -p /tmp/video_converter
+    chown 125:125 /tmp/video_converter
+    chmod 755 /tmp/video_converter
 else
     mkdir -p ~/.local/var/log/video-converter
     # Update config to use user log directory
