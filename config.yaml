@@ -3,8 +3,8 @@
 
 # Directories to scan for videos
 directories:
-  - "/path/to/videos1"
-  - "/path/to/videos2"
+  - "/media"
+  - "/mnt/smallmedia"
   # Add more directories as needed
 
 # Conversion settings
