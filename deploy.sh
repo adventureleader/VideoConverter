@@ -4,15 +4,14 @@
 set -e
 
 REMOTE_HOST="nas01"
-REMOTE_DIR="/opt/video-converter"
-REMOTE_USER=$(ssh $REMOTE_HOST "whoami")
+REMOTE_DIR="~/video-converter"
 
 echo "=== Deploying Video Converter Daemon to nas01 ==="
 echo ""
 
 # Create remote directory
 echo "Creating remote directory..."
-ssh $REMOTE_HOST "sudo mkdir -p $REMOTE_DIR && sudo chown $REMOTE_USER:$REMOTE_USER $REMOTE_DIR"
+ssh $REMOTE_HOST "mkdir -p $REMOTE_DIR"
 
 # Copy files
 echo "Copying files to nas01..."
@@ -25,6 +24,8 @@ rsync -avz --progress \
 
 echo ""
 echo "=== Deployment Complete ==="
+echo ""
+echo "Files deployed to: $REMOTE_HOST:$REMOTE_DIR"
 echo ""
 echo "Next steps:"
 echo "  1. SSH to nas01: ssh $REMOTE_HOST"

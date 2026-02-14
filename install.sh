@@ -80,9 +80,31 @@ chmod +x video_converter_daemon.py
 echo ""
 echo "Configuring systemd service..."
 
+# Create service file with correct paths
+cat > /tmp/video-converter.service <<EOF
+[Unit]
+Description=Video Converter Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=/usr/bin/python3 $SCRIPT_DIR/video_converter_daemon.py $SCRIPT_DIR/config.yaml
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 if [ "$SYSTEM_INSTALL" = true ]; then
     # System service
-    cp video-converter.service /etc/systemd/system/
+    mv /tmp/video-converter.service /etc/systemd/system/
     systemctl daemon-reload
     echo "✓ System service installed"
     echo ""
@@ -96,7 +118,7 @@ if [ "$SYSTEM_INSTALL" = true ]; then
 else
     # User service
     mkdir -p ~/.config/systemd/user
-    cp video-converter.service ~/.config/systemd/user/
+    mv /tmp/video-converter.service ~/.config/systemd/user/
     systemctl --user daemon-reload
     echo "✓ User service installed"
     echo ""
