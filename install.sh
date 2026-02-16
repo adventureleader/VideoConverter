@@ -22,12 +22,12 @@ echo "Running as root - installing system service"
 # Check if daemon is running and stop it
 echo ""
 echo "Checking for running daemon..."
-if systemctl is-active --quiet video-converter 2>/dev/null || true; then
+if systemctl list-units --all | grep -q "video-converter.service" && systemctl is-active --quiet video-converter 2>/dev/null; then
     echo "[WARNING] video-converter service is running, stopping it..."
     systemctl stop video-converter
     echo "[OK] Service stopped"
 else
-    echo "[OK] Service not running"
+    echo "[OK] Service not running or not installed yet"
 fi
 
 # Get the script directory (safely)
