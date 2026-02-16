@@ -636,6 +636,17 @@ class VideoConverterDaemon:
         self.logger.info("Scan interval: %d seconds", scan_interval)
         self.logger.info("Monitoring directories: %s", self.config['directories'])
 
+        # In dry-run mode, only do one scan cycle
+        if self.dry_run:
+            self.logger.info("DRY-RUN MODE: Running single scan cycle")
+            try:
+                videos = self.discover_videos()
+                self.process_batch(videos)
+                self.logger.info("Scan cycle complete")
+            except Exception as e:
+                self.logger.error("Error in scan cycle: %s", e, exc_info=True)
+            return
+
         while self.running:
             try:
                 self.logger.info("Starting scan cycle...")
