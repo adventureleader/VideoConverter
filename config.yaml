@@ -35,6 +35,10 @@ processing:
   # Security: Use a dedicated directory outside /tmp to prevent symlink attacks
   work_dir: "/var/lib/video-converter/work"
 
+  # State directory for tracking processed files (processed.json)
+  # Separated from work_dir to isolate persistent state from temporary files
+  state_dir: "/var/lib/video-converter"
+
   # After successful conversion
   keep_original: true  # Set to false to delete originals
 
