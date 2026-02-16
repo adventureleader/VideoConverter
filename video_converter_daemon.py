@@ -15,6 +15,7 @@ import hashlib
 import shutil
 import re
 import threading
+import argparse
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,18 +49,85 @@ MAX_CONVERSION_TIMEOUT = 86400
 # Max file size for conversion: 100 GB
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024 * 1024
 
+# FHS-compliant default paths
+DEFAULT_CONFIG_PATH = '/etc/video-converter/config.yaml'
+DEFAULT_STATE_DIR = '/var/lib/video-converter'
+DEFAULT_LOG_DIR = '/var/log/video-converter'
+VERSION = '2.0.0'
+
 
 class ConfigValidationError(Exception):
     """Raised when configuration values fail validation."""
     pass
 
 
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Video Converter Daemon - Automatically converts video files to .m4v format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Start daemon with default config
+  video_converter_daemon.py
+
+  # Use custom config file
+  video_converter_daemon.py --config /path/to/config.yaml
+
+  # Test mode (log what would be done without converting)
+  video_converter_daemon.py --dry-run
+
+  # Validate config without starting daemon
+  video_converter_daemon.py --validate-config
+
+  # Show version
+  video_converter_daemon.py --version
+        '''
+    )
+
+    parser.add_argument(
+        '--config',
+        type=str,
+        default=DEFAULT_CONFIG_PATH,
+        help=f'Path to config file (default: {DEFAULT_CONFIG_PATH})'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Test mode: log what would be done without converting files'
+    )
+    parser.add_argument(
+        '--validate-config',
+        action='store_true',
+        help='Validate configuration and exit'
+    )
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'Video Converter Daemon v{VERSION}'
+    )
+
+    return parser.parse_args()
+
+
 class VideoConverterDaemon:
-    def __init__(self, config_path: str = "config.yaml"):
-        """Initialize the daemon with configuration"""
+    def __init__(self, config_path: str = "config.yaml", dry_run: bool = False, validate_only: bool = False):
+        """Initialize the daemon with configuration
+
+        Args:
+            config_path: Path to YAML configuration file
+            dry_run: If True, log actions without actually converting files
+            validate_only: If True, only load and validate config, don't initialize daemon
+        """
         self.running = True
+        self.dry_run = dry_run
         self.config = self.load_config(config_path)
         self.validate_config()
+
+        # If validate_only, skip the rest of initialization
+        if validate_only:
+            return
+
         self.setup_logging()
         self.processed_files = self.load_processed_files()
         self.converting = set()
@@ -185,6 +253,13 @@ class VideoConverterDaemon:
                 f"work_dir '{work_dir}' must be an absolute path."
             )
 
+        # Validate state_dir is an absolute path (if specified)
+        state_dir = proc.get('state_dir', DEFAULT_STATE_DIR)
+        if not Path(state_dir).is_absolute():
+            raise ConfigValidationError(
+                f"state_dir '{state_dir}' must be an absolute path."
+            )
+
         # Validate log_file is an absolute path
         log_file = daemon.get('log_file', '')
         if not Path(log_file).is_absolute():
@@ -214,7 +289,8 @@ class VideoConverterDaemon:
 
     def load_processed_files(self) -> Set[str]:
         """Load list of already processed files"""
-        db_file = Path(self.config['processing']['work_dir']) / 'processed.json'
+        state_dir = self.config['processing'].get('state_dir', DEFAULT_STATE_DIR)
+        db_file = Path(state_dir) / 'processed.json'
         if db_file.exists():
             with open(db_file, 'r') as f:
                 data = json.load(f)
@@ -223,7 +299,7 @@ class VideoConverterDaemon:
                     self.logger.warning("processed.json has invalid format, resetting")
                     return set()
                 for item in data:
-                    if not isinstance(item, str) or not re.match(r'^[a-f0-9]{32}$', item):
+                    if not isinstance(item, str) or not re.match(r'^[a-f0-9]{64}$', item):
                         self.logger.warning("processed.json contains invalid hash, resetting")
                         return set()
                 return set(data)
@@ -231,7 +307,8 @@ class VideoConverterDaemon:
 
     def save_processed_files(self):
         """Save list of processed files atomically to prevent corruption"""
-        db_file = Path(self.config['processing']['work_dir']) / 'processed.json'
+        state_dir = self.config['processing'].get('state_dir', DEFAULT_STATE_DIR)
+        db_file = Path(state_dir) / 'processed.json'
         tmp_file = db_file.with_suffix('.json.tmp')
 
         with self._processed_lock:
@@ -379,7 +456,14 @@ class VideoConverterDaemon:
         return True
 
     def convert_video(self, video_path: Path) -> bool:
-        """Convert a single video file"""
+        """Convert a single video file
+
+        Args:
+            video_path: Path to video file to convert
+
+        Returns:
+            True if conversion successful, False otherwise
+        """
         file_hash = self.get_file_hash(str(video_path))
         work_dir = Path(self.config['processing']['work_dir'])
 
@@ -388,6 +472,15 @@ class VideoConverterDaemon:
                 self.converting.add(file_hash)
 
             self.logger.info("Starting conversion: %s", video_path)
+
+            # Dry-run mode: log what would be done without converting
+            if self.dry_run:
+                self.logger.info("[DRY-RUN] Would convert: %s", video_path)
+                self.logger.info("[DRY-RUN] Would output to: %s", video_path.with_suffix('.m4v'))
+                with self._processed_lock:
+                    self.processed_files.add(file_hash)
+                self.save_processed_files()
+                return True
 
             # Security: Re-verify the file still exists and is safe before conversion
             if not video_path.is_file():
@@ -571,16 +664,26 @@ class VideoConverterDaemon:
 
 def main():
     """Main entry point"""
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    args = parse_arguments()
 
     # Security: Resolve to absolute path
-    config_resolved = Path(config_path).resolve()
+    config_resolved = Path(args.config).resolve()
     if not config_resolved.is_file():
         print(f"Error: Config file not found: {config_resolved}")
         sys.exit(1)
 
     try:
-        daemon = VideoConverterDaemon(str(config_resolved))
+        # For --validate-config, only validate config without starting daemon
+        if args.validate_config:
+            # Load and validate config without initializing full daemon
+            config = VideoConverterDaemon(str(config_resolved), validate_only=True).config
+            print("✓ Configuration is valid")
+            sys.exit(0)
+
+        # Start daemon (with optional dry-run mode)
+        daemon = VideoConverterDaemon(str(config_resolved), dry_run=args.dry_run)
+        if args.dry_run:
+            daemon.logger.info("Starting in DRY-RUN mode - no files will be converted")
         daemon.run()
     except ConfigValidationError as e:
         print(f"Configuration error: {e}")
