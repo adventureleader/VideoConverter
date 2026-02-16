@@ -361,6 +361,26 @@ A management script is provided for common operations:
 ./manage.sh config      # Edit configuration
 ```
 
+## Uninstallation
+
+To uninstall the daemon:
+
+```bash
+sudo ./uninstall.sh
+```
+
+The uninstall script will:
+- Stop and disable the systemd service
+- Remove the daemon binary
+- Remove the systemd service file
+- Optionally remove configuration and state files (preserves by default for data safety)
+
+You can later remove remaining files manually:
+
+```bash
+sudo rm -rf /etc/video-converter /var/lib/video-converter /var/log/video-converter
+```
+
 ## License
 
 Free to use and modify as needed.
