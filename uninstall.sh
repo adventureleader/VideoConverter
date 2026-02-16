@@ -52,6 +52,13 @@ if [ -f /usr/local/bin/video_converter_daemon.py ]; then
     echo "[OK] Daemon binary removed"
 fi
 
+# Remove management script
+echo "Removing management script..."
+if [ -f /usr/local/bin/video-converter-manage ]; then
+    rm /usr/local/bin/video-converter-manage
+    echo "[OK] Management script removed"
+fi
+
 # Ask about keeping configuration and state
 echo ""
 read -p "Keep configuration and state files? (y/n): " -n 1 -r

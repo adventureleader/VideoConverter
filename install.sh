@@ -347,6 +347,13 @@ cp "$SOURCE_DIR/video_converter_daemon.py" /usr/local/bin/video_converter_daemon
 chmod 755 /usr/local/bin/video_converter_daemon.py
 echo "[OK] Daemon script installed to /usr/local/bin/video_converter_daemon.py"
 
+# Copy management script to /usr/local/bin
+echo ""
+echo "Installing management script..."
+cp "$SOURCE_DIR/manage.sh" /usr/local/bin/video-converter-manage
+chmod 755 /usr/local/bin/video-converter-manage
+echo "[OK] Management script installed to /usr/local/bin/video-converter-manage"
+
 # Copy config file (don't overwrite if it exists)
 echo ""
 echo "Installing configuration file..."

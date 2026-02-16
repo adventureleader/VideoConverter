@@ -344,21 +344,28 @@ If you're upgrading from an older version that ran as a user service:
 
 ## Management Script
 
-A management script is provided for common operations:
+A management script is provided for common operations. After installation, it's available as `video-converter-manage`:
 
 ```bash
-./manage.sh start       # Start the daemon
-./manage.sh stop        # Stop the daemon
-./manage.sh restart     # Restart the daemon
-./manage.sh status      # Show daemon status
-./manage.sh logs        # Show recent logs
-./manage.sh follow      # Follow logs in real-time
-./manage.sh enable      # Enable auto-start
-./manage.sh disable     # Disable auto-start
-./manage.sh stats       # Show conversion statistics
-./manage.sh reset       # Reset processed files database
-./manage.sh test        # Run in test mode
-./manage.sh config      # Edit configuration
+video-converter-manage start       # Start the daemon
+video-converter-manage stop        # Stop the daemon
+video-converter-manage restart     # Restart the daemon
+video-converter-manage status      # Show daemon status
+video-converter-manage logs        # Show recent logs
+video-converter-manage follow      # Follow logs in real-time
+video-converter-manage enable      # Enable auto-start
+video-converter-manage disable     # Disable auto-start
+video-converter-manage stats       # Show conversion statistics
+video-converter-manage reset       # Reset processed files database
+video-converter-manage test        # Run in test mode (dry-run)
+video-converter-manage config      # Edit configuration
+```
+
+**Location:** `/usr/local/bin/video-converter-manage`
+
+You can also run it from the source directory:
+```bash
+./manage.sh <command>
 ```
 
 ## Uninstallation
