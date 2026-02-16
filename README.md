@@ -1,75 +1,80 @@
 # Video Converter Daemon
 
-Automatically discovers and converts video files to .m4v format. Designed to run locally on nas01 for efficient processing without network transfers.
+Automatically discovers and converts video files to .m4v format. Designed to run as a system service with root privileges for universal file access.
 
 ## Features
 
-- **Automatic Discovery**: Scans specified directories on nas01 for video files
+- **Automatic Discovery**: Scans specified directories for video files
 - **Concurrent Processing**: Converts multiple videos simultaneously
 - **Smart Tracking**: Remembers processed files to avoid re-processing
 - **Configurable**: Flexible conversion settings (quality, codecs, etc.)
-- **Daemon Service**: Runs continuously in the background
+- **Daemon Service**: Runs continuously in the background as root
+- **FHS Compliant**: Uses standard Linux filesystem hierarchy paths
 - **Robust**: Handles errors gracefully and retries on failure
+- **Security Hardened**: Input validation, path traversal prevention, systemd isolation
 
 ## Requirements
 
 - Python 3.6+
 - FFmpeg
-- Runs on nas01 (the server with the video files)
+- PyYAML
+- systemd (for service management)
+- Root privileges (for universal file access)
 
 ## Installation
 
-### From Development Machine
+### Prerequisites
 
-1. **Deploy to nas01**:
+Before installation, ensure you have the required dependencies:
+
+```bash
+sudo apt update
+sudo apt install ffmpeg python3-yaml
+```
+
+### System Service Installation
+
+1. **Clone or download the Video Converter Daemon**:
    ```bash
-   ./deploy.sh
+   cd VideoConverter
    ```
 
-2. **SSH to nas01 and complete setup**:
+2. **Edit the configuration file**:
    ```bash
-   ssh nas01
-   cd /opt/video-converter
+   # Review config.yaml and set the directories to scan
+   nano config.yaml
    ```
 
-### On nas01
-
-1. **Install system dependencies** (if not already installed):
+3. **Run the installation script as root**:
    ```bash
-   sudo apt install ffmpeg python3-pip
-   pip3 install --user PyYAML
-   ```
-
-2. **Edit the configuration file** `config.yaml`:
-   - Set the directories to scan for videos
-   - Adjust conversion quality settings
-   - Configure other options as needed
-
-3. **Run the installation script**:
-   ```bash
-   # For user service (recommended)
-   ./install.sh
-
-   # For system-wide service
    sudo ./install.sh
    ```
 
-4. **Start the daemon**:
-   ```bash
-   # User service
-   systemctl --user enable video-converter
-   systemctl --user start video-converter
+The installation script will:
+- Verify dependencies
+- Create FHS-compliant directories
+- Install the daemon to `/usr/local/bin/`
+- Install config to `/etc/video-converter/`
+- Setup systemd service
+- Automatically migrate any old processed files database
 
-   # System service
+4. **Configure the service**:
+   ```bash
+   sudo nano /etc/video-converter/config.yaml
+   ```
+
+5. **Enable and start the service**:
+   ```bash
    sudo systemctl enable video-converter
    sudo systemctl start video-converter
    ```
 
 ## Configuration
 
-Edit `config.yaml` to customize the daemon behavior:
+Edit `/etc/video-converter/config.yaml` to customize the daemon behavior:
 
 ### Directories to Monitor
+
 ```yaml
 directories:
   - "/path/to/videos1"
@@ -77,6 +82,7 @@ directories:
 ```
 
 ### Conversion Quality
+
 - **crf**: 18-28 (lower = better quality, larger file size)
   - 18-20: Very high quality
   - 21-23: High quality (recommended)
@@ -90,62 +96,95 @@ directories:
   - `veryslow` - Best compression, very slow
 
 ### Processing Options
+
 - `keep_original`: Keep or delete source files after conversion
-- `max_workers`: Number of concurrent conversions
-- `scan_interval`: How often to scan for new files (seconds)
+- `max_workers`: Number of concurrent conversions (1-8)
+- `scan_interval`: How often to scan for new files (seconds, minimum 30)
+
+### FHS Paths
+
+The daemon uses the following standard Linux paths:
+
+- **Configuration**: `/etc/video-converter/config.yaml`
+- **State/Data**: `/var/lib/video-converter/` (processed.json)
+- **Work Directory**: `/var/lib/video-converter/work/` (temporary files)
+- **Logs**: `/var/log/video-converter/daemon.log`
+- **Binary**: `/usr/local/bin/video_converter_daemon.py`
 
 ## Usage
 
 ### Check Status
-```bash
-# User service
-systemctl --user status video-converter
 
-# System service
+```bash
 sudo systemctl status video-converter
 ```
 
 ### View Logs
-```bash
-# User service
-journalctl --user -u video-converter -f
 
-# System service
+```bash
+# View recent logs
+sudo journalctl -u video-converter -n 50
+
+# Follow logs in real-time
 sudo journalctl -u video-converter -f
 
 # Or view log file directly
-tail -f /var/log/video-converter/daemon.log
+sudo tail -f /var/log/video-converter/daemon.log
 ```
 
-### Stop/Start/Restart
-```bash
-# User service
-systemctl --user stop video-converter
-systemctl --user start video-converter
-systemctl --user restart video-converter
+### Control Service
 
-# System service
-sudo systemctl stop video-converter
+```bash
+# Start
 sudo systemctl start video-converter
+
+# Stop
+sudo systemctl stop video-converter
+
+# Restart
 sudo systemctl restart video-converter
+
+# Disable auto-start
+sudo systemctl disable video-converter
 ```
 
-### Disable Auto-start
-```bash
-# User service
-systemctl --user disable video-converter
+### CLI Flags
 
-# System service
-sudo systemctl disable video-converter
+The daemon supports several command-line flags:
+
+```bash
+# Use custom config file
+video_converter_daemon.py --config /path/to/config.yaml
+
+# Test mode (log what would be done without converting)
+video_converter_daemon.py --dry-run
+
+# Validate configuration and exit
+video_converter_daemon.py --validate-config
+
+# Show version
+video_converter_daemon.py --version
+
+# Show help
+video_converter_daemon.py --help
 ```
 
 ## Manual Testing
 
-Test the converter without running as a daemon:
+Test the converter without running as a systemd service:
 
 ```bash
-# Edit config.yaml first, then:
-python3 video_converter_daemon.py config.yaml
+# Run in foreground with default config
+sudo /usr/local/bin/video_converter_daemon.py
+
+# Run with custom config
+sudo /usr/local/bin/video_converter_daemon.py --config /path/to/config.yaml
+
+# Test mode (no conversion, just logging)
+sudo /usr/local/bin/video_converter_daemon.py --dry-run
+
+# Validate config
+sudo /usr/local/bin/video_converter_daemon.py --validate-config
 ```
 
 Press Ctrl+C to stop.
@@ -153,40 +192,69 @@ Press Ctrl+C to stop.
 ## Troubleshooting
 
 ### Check FFmpeg
+
 ```bash
 ffmpeg -version
 ```
 
-### Check for Errors
-```bash
-# View recent logs
-journalctl --user -u video-converter -n 50
+### View Errors
 
-# Search for errors
-journalctl --user -u video-converter | grep ERROR
+```bash
+# Last 50 error log entries
+sudo journalctl -u video-converter -p err -n 50
+
+# Search for specific errors
+sudo journalctl -u video-converter | grep ERROR
 ```
 
 ### Reset Processed Files
+
 If you want to re-process files:
+
 ```bash
-rm /tmp/video_converter/processed.json
+sudo rm /var/lib/video-converter/processed.json
+sudo systemctl restart video-converter
 ```
 
 ### Test Single Conversion
+
 ```bash
 ffmpeg -i input.mp4 -c:v libx264 -crf 23 -preset medium -c:a aac -b:a 128k output.m4v
+```
+
+### Check Permissions
+
+If conversions fail due to permission issues:
+
+```bash
+# Ensure video directories are readable
+ls -la /path/to/videos
+
+# Verify work directory exists and is writable
+ls -la /var/lib/video-converter/
+
+# Check log directory
+ls -la /var/log/video-converter/
 ```
 
 ## File Structure
 
 ```
 VideoConverter/
-├── config.yaml                 # Configuration file
-├── video_converter_daemon.py   # Main daemon script
-├── video-converter.service     # Systemd service file
-├── install.sh                  # Installation script
-├── requirements.txt            # Python dependencies
-└── README.md                   # This file
+├── config.yaml                    # Configuration file
+├── video_converter_daemon.py      # Main daemon script
+├── video-converter.service        # Systemd service file
+├── install.sh                     # Installation script
+├── manage.sh                      # Management utility script
+├── deploy.sh                      # Deployment script
+├── requirements.txt               # Python dependencies
+├── README.md                      # This file
+├── CHANGELOG.md                   # Change history
+├── QUICKSTART.md                  # Quick start guide
+└── tests/                         # Test files
+    ├── test_daemon.py            # Unit tests
+    ├── test_integration.sh        # Integration tests
+    └── conftest.py               # Pytest fixtures
 ```
 
 ## How It Works
@@ -200,34 +268,107 @@ VideoConverter/
 
 ## Performance Tips
 
-- **max_workers**: Increase for faster processing (uses more CPU/RAM)
+- **max_workers**: Increase for faster parallel processing (uses more CPU/RAM)
 - **work_dir**: Use fast local storage (SSD) for temporary files
 - **preset**: Use `fast` or `faster` for quicker conversions
 - **crf**: Higher values (24-26) process faster and create smaller files
 
-## Advanced Configuration
+## Security Considerations
 
-### Custom FFmpeg Options
-Add extra FFmpeg parameters in `config.yaml`:
-```yaml
-conversion:
-  extra_options:
-    - "-movflags"
-    - "+faststart"
-    - "-pix_fmt"
-    - "yuv420p"
-```
+### Why Root?
 
-### Exclude Patterns
-Skip certain files or directories:
-```yaml
-processing:
-  exclude_patterns:
-    - "*/.backup/*"
-    - "*/temp/*"
-    - "*_converted_*"
+The daemon runs as root to provide universal file access across the entire filesystem. This simplifies permission management for a daemon that needs to read/write files from various sources.
+
+### Security Measures
+
+The daemon includes extensive security hardening:
+
+- **Input Validation**: All configuration values validated against allowlists at startup
+- **Path Traversal Prevention**: Validates resolved paths to prevent symlink-based attacks
+- **No Shell Injection**: Arguments passed as lists, never through shell execution
+- **Restricted Features**: `extra_options` disabled to prevent ffmpeg flag injection
+- **Atomic Operations**: File operations use temp files and atomic renames
+- **Resource Limits**: File size limits, timeouts, and resource quotas
+- **Systemd Isolation**: Process resource limits (memory, CPU, file descriptors)
+- **Strict File Permissions**: Configuration files restricted to owner/group
+
+### Systemd Security Hardening
+
+The systemd service includes:
+
+- `NoNewPrivileges=yes`: Prevents privilege escalation via executables
+- `ProtectKernelTunables=yes`: Prevents modification of kernel parameters
+- `ProtectKernelModules=yes`: Prevents kernel module loading
+- `RestrictSUIDSGID=yes`: Prevents SUID/SGID execution
+- `RestrictNamespaces=yes`: Prevents namespace creation
+- Resource limits on memory, CPU, and file descriptors
+
+## Migration from Older Versions
+
+If you're upgrading from an older version that ran as a user service:
+
+1. **Backup your current setup**:
+   ```bash
+   cp -r /opt/video-converter ~/video-converter-backup || true
+   cp ~/.config/systemd/user/video-converter.service ~/video-converter-backup/ || true
+   ```
+
+2. **Stop the user service**:
+   ```bash
+   systemctl --user stop video-converter
+   systemctl --user disable video-converter
+   ```
+
+3. **Run the new installer**:
+   ```bash
+   sudo ./install.sh
+   ```
+
+4. **Copy your config if needed**:
+   ```bash
+   # If you had custom settings
+   sudo nano /etc/video-converter/config.yaml
+   ```
+
+5. **Start the new system service**:
+   ```bash
+   sudo systemctl enable video-converter
+   sudo systemctl start video-converter
+   ```
+
+6. **Verify operation**:
+   ```bash
+   sudo systemctl status video-converter
+   sudo journalctl -u video-converter -f
+   ```
+
+## Management Script
+
+A management script is provided for common operations:
+
+```bash
+./manage.sh start       # Start the daemon
+./manage.sh stop        # Stop the daemon
+./manage.sh restart     # Restart the daemon
+./manage.sh status      # Show daemon status
+./manage.sh logs        # Show recent logs
+./manage.sh follow      # Follow logs in real-time
+./manage.sh enable      # Enable auto-start
+./manage.sh disable     # Disable auto-start
+./manage.sh stats       # Show conversion statistics
+./manage.sh reset       # Reset processed files database
+./manage.sh test        # Run in test mode
+./manage.sh config      # Edit configuration
 ```
 
 ## License
 
 Free to use and modify as needed.
+
+## Support
+
+For issues or questions:
+- Check the logs: `sudo journalctl -u video-converter`
+- Review the troubleshooting section above
+- Check the QUICKSTART.md for quick reference
+- Review the CHANGELOG.md for version history
