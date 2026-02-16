@@ -17,13 +17,12 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-SYSTEM_INSTALL=true
 echo "Running as root - installing system service"
 
 # Check if daemon is running and stop it
 echo ""
 echo "Checking for running daemon..."
-if systemctl is-active --quiet video-converter; then
+if systemctl is-active --quiet video-converter 2>/dev/null || true; then
     echo "[WARNING] video-converter service is running, stopping it..."
     systemctl stop video-converter
     echo "[OK] Service stopped"
@@ -40,20 +39,6 @@ if [ ! -f "$SOURCE_DIR/video_converter_daemon.py" ] || [ ! -f "$SOURCE_DIR/confi
     echo "ERROR: Required files not found in $SOURCE_DIR"
     echo "       Ensure video_converter_daemon.py and config.yaml exist."
     exit 1
-fi
-
-# For system installs, copy to /opt/video-converter and update SCRIPT_DIR
-if [ "$EUID" -eq 0 ]; then
-    INSTALL_DIR="/opt/video-converter"
-    echo "Installing to: $INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
-    cp -f "$SOURCE_DIR"/*.py "$INSTALL_DIR/"
-    cp -f "$SOURCE_DIR"/*.yaml "$INSTALL_DIR/"
-    cp -f "$SOURCE_DIR"/*.sh "$INSTALL_DIR/"
-    cp -f "$SOURCE_DIR"/*.txt "$INSTALL_DIR/"
-    SCRIPT_DIR="$INSTALL_DIR"
-else
-    SCRIPT_DIR="$SOURCE_DIR"
 fi
 
 # Check dependencies
@@ -80,7 +65,6 @@ else
     echo "[OK] FFmpeg found: $(ffmpeg -version | head -n1)"
 fi
 
-
 # Install Python dependencies
 echo ""
 echo "Installing Python dependencies..."
@@ -92,7 +76,7 @@ if ! python3 -c "import yaml" 2>/dev/null; then
     # Try system package first
     if command -v apt &> /dev/null; then
         echo "Installing via apt (recommended)..."
-        sudo apt install -y python3-yaml
+        apt install -y python3-yaml
     else
         # Fallback to pip with --break-system-packages for externally-managed environments
         echo "Installing via pip..."
@@ -101,25 +85,6 @@ if ! python3 -c "import yaml" 2>/dev/null; then
 else
     echo "[OK] PyYAML already installed"
 fi
-
-# Determine the service user for system installs
-# Use existing docker user/group for system service
-SERVICE_USER="docker"
-SERVICE_GROUP="docker"
-
-# Verify docker user exists
-if ! id "$SERVICE_USER" &>/dev/null; then
-    echo "ERROR: User '$SERVICE_USER' does not exist"
-    echo "Please install Docker or specify a different user"
-    exit 1
-fi
-
-if ! getent group "$SERVICE_GROUP" &>/dev/null; then
-    echo "ERROR: Group '$SERVICE_GROUP' does not exist"
-    exit 1
-fi
-
-echo "[OK] Using service user: $SERVICE_USER (group: $SERVICE_GROUP)"
 
 # Validate and optionally fix write permissions for all configured directories
 echo ""
@@ -233,7 +198,7 @@ else:
     sys.exit(0)
 PYTHON_EOF
 
-python3 "$VALIDATE_SCRIPT" "$SCRIPT_DIR/config.yaml"
+python3 "$VALIDATE_SCRIPT" "$SOURCE_DIR/config.yaml"
 PERM_STATUS=$?
 
 if [ $PERM_STATUS -eq 2 ]; then
@@ -324,7 +289,7 @@ print(f"[OK] Fixed {len(fixed_dirs)} directories")
 sys.exit(0)
 PYTHON_FIX_EOF
 
-        python3 "$FIX_SCRIPT" "$SCRIPT_DIR/config.yaml"
+        python3 "$FIX_SCRIPT" "$SOURCE_DIR/config.yaml"
         if [ $? -ne 0 ]; then
             exit 1
         fi
@@ -339,92 +304,71 @@ elif [ $PERM_STATUS -ne 0 ]; then
     exit 1
 fi
 
-# Set up directories
+# Create FHS-compliant directories
 echo ""
-echo "Setting up directories..."
-# Set ownership of install directory to docker
-chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$INSTALL_DIR"
-chmod -R 750 "$INSTALL_DIR"
-chmod 640 "$INSTALL_DIR/config.yaml"
+echo "Creating FHS-compliant directories..."
 
-mkdir -p /var/log/video-converter
-chown "$SERVICE_USER":"$SERVICE_GROUP" /var/log/video-converter
-# Security: Restrict log directory permissions (owner rwx, group rx, others none)
-chmod 750 /var/log/video-converter
+# /etc/video-converter - configuration
+mkdir -p /etc/video-converter
+chmod 755 /etc/video-converter
 
-# Create work directory
-# Security: Use a directory under /var/lib instead of /tmp to avoid
-# /tmp-based symlink attacks and tmpwatch cleanup issues
+# /var/lib/video-converter - state and work
 mkdir -p /var/lib/video-converter/work
-chown -R "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/video-converter
-# Security: Parent directory allows owner to access subdirectories
-chmod 750 /var/lib/video-converter
-# Work directory is owner-only (contains videos during conversion)
+chmod 755 /var/lib/video-converter
 chmod 700 /var/lib/video-converter/work
 
-# Make daemon script executable (owner and group only)
-chmod 750 video_converter_daemon.py
+# /var/log/video-converter - logs
+mkdir -p /var/log/video-converter
+chmod 755 /var/log/video-converter
 
-# Security: Restrict config file permissions (may contain sensitive paths)
-chmod 640 config.yaml
+echo "[OK] FHS directories created"
+
+# Copy daemon script to /usr/local/bin
+echo ""
+echo "Installing daemon script..."
+cp "$SOURCE_DIR/video_converter_daemon.py" /usr/local/bin/video_converter_daemon.py
+chmod 755 /usr/local/bin/video_converter_daemon.py
+echo "[OK] Daemon script installed to /usr/local/bin/video_converter_daemon.py"
+
+# Copy config file (don't overwrite if it exists)
+echo ""
+echo "Installing configuration file..."
+if [ -f /etc/video-converter/config.yaml ]; then
+    echo "[SKIP] Config file already exists at /etc/video-converter/config.yaml"
+    echo "       Keeping existing configuration"
+else
+    cp "$SOURCE_DIR/config.yaml" /etc/video-converter/config.yaml
+    chmod 644 /etc/video-converter/config.yaml
+    echo "[OK] Config file installed to /etc/video-converter/config.yaml"
+fi
+
+# Auto-migrate processed.json from old location if it exists
+echo ""
+echo "Checking for processed files database migration..."
+OLD_DB="/opt/video-converter/work/processed.json"
+NEW_DB="/var/lib/video-converter/processed.json"
+
+if [ -f "$OLD_DB" ] && [ ! -f "$NEW_DB" ]; then
+    echo "[MIGRATE] Found old database at $OLD_DB"
+    cp "$OLD_DB" "$NEW_DB"
+    chmod 600 "$NEW_DB"
+    echo "[OK] Migrated to $NEW_DB"
+elif [ -f "$NEW_DB" ]; then
+    echo "[OK] Database already exists at $NEW_DB"
+else
+    echo "[OK] No existing database found"
+fi
 
 # Configure the service
 echo ""
 echo "Configuring systemd service..."
 
-# Security: Use mktemp for the temporary service file instead of a predictable path
-TEMP_SERVICE_FILE="$(mktemp /tmp/video-converter.service.XXXXXX)"
-# Security: Ensure temp file is cleaned up on exit
-trap "rm -f '$TEMP_SERVICE_FILE'" EXIT
-
-# Create system service file with correct paths
-cat > "$TEMP_SERVICE_FILE" <<EOF
-[Unit]
-Description=Video Converter Daemon
-After=network.target
-
-[Service]
-Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_GROUP
-WorkingDirectory=$SCRIPT_DIR
-ExecStart=/usr/bin/python3 $SCRIPT_DIR/video_converter_daemon.py $SCRIPT_DIR/config.yaml
-Restart=on-failure
-RestartSec=30
-StandardOutput=journal
-StandardError=journal
-
-# Environment
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
-
-# Security hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-RestrictNamespaces=yes
-
-# Allow read-write to specific directories only
-ReadWritePaths=/var/log/video-converter /var/lib/video-converter
-
-# Resource limits to prevent runaway processes
-LimitNOFILE=4096
-MemoryMax=4G
-CPUQuota=80%
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Security: Set restrictive permissions on the service file
-chmod 644 "$TEMP_SERVICE_FILE"
-mv "$TEMP_SERVICE_FILE" /etc/systemd/system/video-converter.service
+# Copy service file
+cp "$SOURCE_DIR/video-converter.service" /etc/systemd/system/video-converter.service
+chmod 644 /etc/systemd/system/video-converter.service
 systemctl daemon-reload
 echo "[OK] System service installed"
+
 echo ""
 echo "To enable and start the service:"
 echo "  sudo systemctl enable video-converter"
@@ -437,9 +381,10 @@ echo "  sudo journalctl -u video-converter -f"
 echo ""
 echo "=== Installation Complete ==="
 echo ""
-echo "IMPORTANT: Before starting the service, edit config.yaml to:"
-echo "  1. Set the correct directories on nas01 to scan"
-echo "  2. Adjust conversion quality settings if needed"
-echo "  3. Configure other options as desired"
+echo "IMPORTANT: Before starting the service, ensure config.yaml is correct:"
+echo "  1. Edit /etc/video-converter/config.yaml"
+echo "  2. Set the correct directories to scan"
+echo "  3. Adjust conversion quality settings if needed"
+echo "  4. Configure other options as desired"
 echo ""
-echo "Configuration file: $SCRIPT_DIR/config.yaml"
+echo "Configuration file: /etc/video-converter/config.yaml"
