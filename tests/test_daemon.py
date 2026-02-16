@@ -86,11 +86,8 @@ class TestConfigValidation:
             yaml.dump(minimal_config, f)
             f.flush()
             try:
-                with patch('video_converter_daemon.Path.resolve') as mock_resolve:
-                    mock_resolve.return_value.is_file.return_value = True
-                daemon = VideoConverterDaemon(f.name)
                 with pytest.raises(ConfigValidationError):
-                    pass  # Error should be raised in __init__
+                    daemon = VideoConverterDaemon(f.name)
             finally:
                 os.unlink(f.name)
 
@@ -116,7 +113,7 @@ class TestConfigValidation:
             f.flush()
             try:
                 with pytest.raises(ConfigValidationError):
-                    VideoConverterDaemon(f.name)
+                    daemon = VideoConverterDaemon(f.name)
             finally:
                 os.unlink(f.name)
 
@@ -129,7 +126,7 @@ class TestConfigValidation:
             f.flush()
             try:
                 with pytest.raises(ConfigValidationError):
-                    VideoConverterDaemon(f.name)
+                    daemon = VideoConverterDaemon(f.name)
             finally:
                 os.unlink(f.name)
 
