@@ -4,10 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=videoconverter
-Group=videoconverter
-WorkingDirectory=/opt/video-converter
-ExecStart=/usr/bin/python3 /opt/video-converter/video_converter_daemon.py /opt/video-converter/config.yaml
+WorkingDirectory=/var/lib/video-converter
+ExecStart=/usr/local/bin/video_converter_daemon.py --config /etc/video-converter/config.yaml
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal
@@ -18,17 +16,11 @@ Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 
 # Security hardening
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
-
-# Allow read-write to specific directories only
-ReadWritePaths=/var/log/video-converter /var/lib/video-converter
 
 # Resource limits
 LimitNOFILE=4096
