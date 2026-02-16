@@ -55,10 +55,18 @@ echo "[OK] Python 3 found: $(python3 --version)"
 # Check FFmpeg
 if ! command -v ffmpeg &> /dev/null; then
     echo "WARNING: ffmpeg is not installed"
-    echo "Please install ffmpeg: sudo apt install ffmpeg"
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Installing ffmpeg..."
+    if command -v apt &> /dev/null; then
+        apt update
+        apt install -y ffmpeg
+        if ! command -v ffmpeg &> /dev/null; then
+            echo "ERROR: Failed to install ffmpeg"
+            exit 1
+        fi
+        echo "[OK] FFmpeg installed: $(ffmpeg -version | head -n1)"
+    else
+        echo "ERROR: ffmpeg is required but apt is not available"
+        echo "Please install ffmpeg manually: apt install ffmpeg"
         exit 1
     fi
 else
@@ -71,17 +79,26 @@ echo "Installing Python dependencies..."
 
 # Try system package first (recommended for newer Ubuntu/Debian)
 if ! python3 -c "import yaml" 2>/dev/null; then
-    echo "PyYAML not found, attempting to install..."
+    echo "PyYAML not found, installing..."
 
     # Try system package first
     if command -v apt &> /dev/null; then
         echo "Installing via apt (recommended)..."
         apt install -y python3-yaml
+        if ! python3 -c "import yaml" 2>/dev/null; then
+            echo "ERROR: Failed to install PyYAML via apt"
+            exit 1
+        fi
     else
         # Fallback to pip with --break-system-packages for externally-managed environments
         echo "Installing via pip..."
         pip3 install --user --break-system-packages PyYAML || pip3 install --user PyYAML
+        if ! python3 -c "import yaml" 2>/dev/null; then
+            echo "ERROR: Failed to install PyYAML"
+            exit 1
+        fi
     fi
+    echo "[OK] PyYAML installed"
 else
     echo "[OK] PyYAML already installed"
 fi
