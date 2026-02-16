@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint with flake8
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 video_converter_daemon.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Exit-zero treats all errors as warnings
+          flake8 video_converter_daemon.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pyyaml
+
+      - name: Run unit tests
+        run: python -m pytest tests/test_daemon.py -v
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Run integration tests
+        run: |
+          chmod +x tests/test_integration.sh
+          bash tests/test_integration.sh
+
+  systemd-test:
+    name: Systemd Service Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg systemd
+
+      - name: Verify systemd service file
+        run: |
+          # Check if service file is valid
+          systemd-analyze verify video-converter.service || true
+
+          # Check for syntax issues
+          if grep -q "User=\|Group=" video-converter.service; then
+            echo "ERROR: Service file should not contain User= or Group= for root service"
+            exit 1
+          fi
+
+          # Verify paths are FHS-compliant
+          if ! grep -q "/usr/local/bin/video_converter_daemon.py" video-converter.service; then
+            echo "ERROR: Service file should reference /usr/local/bin/video_converter_daemon.py"
+            exit 1
+          fi
+
+          if ! grep -q "/etc/video-converter/config.yaml" video-converter.service; then
+            echo "ERROR: Service file should reference /etc/video-converter/config.yaml"
+            exit 1
+          fi
+
+          echo "✓ Service file validated"
+
+      - name: Verify installation script
+        run: |
+          # Check if install.sh has required FHS paths
+          if ! grep -q "/etc/video-converter" install.sh; then
+            echo "ERROR: install.sh should create /etc/video-converter"
+            exit 1
+          fi
+
+          if ! grep -q "/var/lib/video-converter" install.sh; then
+            echo "ERROR: install.sh should create /var/lib/video-converter"
+            exit 1
+          fi
+
+          if ! grep -q "/var/log/video-converter" install.sh; then
+            echo "ERROR: install.sh should create /var/log/video-converter"
+            exit 1
+          fi
+
+          # Check that user/group lines are removed
+          if grep -q "SERVICE_USER\|SERVICE_GROUP" install.sh; then
+            # These should only be in conditional logic for backward compat or removed entirely
+            if grep -q "docker\|videoconverter" install.sh; then
+              echo "ERROR: install.sh should not reference docker or videoconverter user"
+              exit 1
+            fi
+          fi
+
+          echo "✓ Installation script validated"
+
+      - name: Verify config.yaml
+        run: |
+          python3 <<EOF
+          import yaml
+
+          with open('config.yaml') as f:
+              config = yaml.safe_load(f)
+
+          # Check FHS paths
+          assert config['processing']['work_dir'] == '/var/lib/video-converter/work'
+          assert config['processing']['state_dir'] == '/var/lib/video-converter'
+          assert config['daemon']['log_file'] == '/var/log/video-converter/daemon.log'
+
+          print('✓ Config file validated')
+          EOF
