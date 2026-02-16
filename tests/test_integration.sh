@@ -119,7 +119,8 @@ echo ""
 
 # Test 5: Dry-run mode
 echo "Test 5: Dry-run mode"
-if timeout 40 python3 video_converter_daemon.py --config "$TEST_DIR/config.yaml" --dry-run 2>&1 | grep -q "DRY-RUN\|Scan cycle complete\|Starting in DRY-RUN"; then
+DRY_RUN_OUTPUT=$(timeout 40 python3 video_converter_daemon.py --config "$TEST_DIR/config.yaml" --dry-run 2>&1)
+if echo "$DRY_RUN_OUTPUT" | grep -q "DRY-RUN\|Scan cycle complete\|Starting in DRY-RUN"; then
     test_result "Dry-run mode" "PASS"
 else
     test_result "Dry-run mode" "FAIL"
