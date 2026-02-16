@@ -23,6 +23,7 @@ show_usage() {
     echo "  enable      Enable daemon to start on boot"
     echo "  disable     Disable daemon auto-start"
     echo "  stats       Show conversion statistics"
+    echo "  pending     Show pending files to convert by directory"
     echo "  reset       Reset processed files database"
     echo "  test        Test run (manual mode, FHS paths)"
     echo "  config      Edit configuration"
@@ -50,6 +51,121 @@ show_stats() {
     echo ""
     echo "=== Current Status ==="
     $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager | grep -E "(Active:|Tasks:|Memory:|CPU:)" || echo "Service inactive or not available"
+}
+
+show_pending() {
+    echo "=== Pending Files to Convert ==="
+    echo ""
+
+    # Get config file
+    CONFIG_FILE="/etc/video-converter/config.yaml"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "ERROR: Config file not found at $CONFIG_FILE"
+        return 1
+    fi
+
+    # Load processed files
+    STATE_DIR="/var/lib/video-converter"
+    PROCESSED_FILE="$STATE_DIR/processed.json"
+
+    # Get processed hashes
+    if [ -f "$PROCESSED_FILE" ]; then
+        PROCESSED_HASHES=$(jq -r '.[]' "$PROCESSED_FILE" 2>/dev/null || echo "")
+    else
+        PROCESSED_HASHES=""
+    fi
+
+    # Parse config and scan directories
+    python3 << 'PYTHON_EOF'
+import yaml
+import json
+import os
+import hashlib
+from pathlib import Path
+from collections import defaultdict
+
+config_file = "/etc/video-converter/config.yaml"
+processed_file = "/var/lib/video-converter/processed.json"
+
+try:
+    with open(config_file) as f:
+        config = yaml.safe_load(f)
+except Exception as e:
+    print(f"ERROR: Failed to load config: {e}")
+    exit(1)
+
+# Load processed hashes
+processed = set()
+if os.path.exists(processed_file):
+    try:
+        with open(processed_file) as f:
+            processed = set(json.load(f))
+    except:
+        pass
+
+# Scan directories
+extensions = set(config['processing']['include_extensions'])
+exclude_patterns = config['processing']['exclude_patterns']
+directories = config['directories']
+
+pending_by_dir = defaultdict(int)
+total_pending = 0
+
+for directory in directories:
+    dir_path = Path(directory)
+    if not dir_path.exists():
+        print(f"[SKIP] {directory}: Directory not found")
+        continue
+
+    dir_pending = 0
+    try:
+        for ext in extensions:
+            pattern = f"**/*.{ext}"
+            for video_file in dir_path.glob(pattern):
+                if not video_file.is_file():
+                    continue
+
+                # Check exclude patterns
+                should_exclude = False
+                for exclude_pattern in exclude_patterns:
+                    if video_file.match(exclude_pattern):
+                        should_exclude = True
+                        break
+
+                if should_exclude:
+                    continue
+
+                # Check if already processed
+                file_hash = hashlib.sha256(str(video_file).encode()).hexdigest()
+                if file_hash not in processed:
+                    # Check if output exists
+                    output_path = video_file.with_suffix('.m4v')
+                    if not output_path.exists() or output_path == video_file:
+                        dir_pending += 1
+                        total_pending += 1
+
+    except Exception as e:
+        print(f"[ERROR] {directory}: {e}")
+
+    if dir_pending > 0:
+        pending_by_dir[directory] = dir_pending
+    elif dir_path.exists():
+        pending_by_dir[directory] = 0
+
+# Display results
+if pending_by_dir:
+    for directory in sorted(pending_by_dir.keys()):
+        count = pending_by_dir[directory]
+        if count > 0:
+            print(f"  {directory}: {count} file(s)")
+        else:
+            print(f"  {directory}: 0 files")
+
+    print()
+    print(f"Total pending: {total_pending} file(s)")
+else:
+    print("No directories configured")
+PYTHON_EOF
 }
 
 case "${1:-}" in
@@ -99,6 +215,10 @@ case "${1:-}" in
 
     stats)
         show_stats
+        ;;
+
+    pending)
+        show_pending
         ;;
 
     reset)
