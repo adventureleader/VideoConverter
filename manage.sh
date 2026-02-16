@@ -4,19 +4,9 @@
 set -euo pipefail
 
 SERVICE_NAME="video-converter"
-CONFIG_FILE="config.yaml"
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-# Check if using system or user service
-if systemctl list-units --full --all | grep -q "^${SERVICE_NAME}.service"; then
-    SERVICE_TYPE="system"
-    SYSTEMCTL_CMD="sudo systemctl"
-    JOURNALCTL_CMD="sudo journalctl"
-else
-    SERVICE_TYPE="user"
-    SYSTEMCTL_CMD="systemctl --user"
-    JOURNALCTL_CMD="journalctl --user"
-fi
+CONFIG_FILE="/etc/video-converter/config.yaml"
+SYSTEMCTL_CMD="sudo systemctl"
+JOURNALCTL_CMD="sudo journalctl"
 
 show_usage() {
     echo "Video Converter Daemon Manager"
@@ -34,7 +24,7 @@ show_usage() {
     echo "  disable     Disable daemon auto-start"
     echo "  stats       Show conversion statistics"
     echo "  reset       Reset processed files database"
-    echo "  test        Test run (manual mode)"
+    echo "  test        Test run (manual mode, FHS paths)"
     echo "  config      Edit configuration"
     echo ""
 }
@@ -43,44 +33,40 @@ show_stats() {
     echo "=== Conversion Statistics ==="
     echo ""
 
-    # Determine work directory based on install type
-    if [ "$SERVICE_TYPE" = "system" ]; then
-        WORK_DIR="/var/lib/video-converter/work"
-    else
-        WORK_DIR="$HOME/.local/var/lib/video-converter/work"
-    fi
+    # Use system service paths
+    STATE_DIR="/var/lib/video-converter"
 
     # Count processed files
-    if [ -f "$WORK_DIR/processed.json" ]; then
-        PROCESSED_COUNT=$(jq '. | length' "$WORK_DIR/processed.json" 2>/dev/null || echo "0")
+    if [ -f "$STATE_DIR/processed.json" ]; then
+        PROCESSED_COUNT=$(jq '. | length' "$STATE_DIR/processed.json" 2>/dev/null || echo "0")
         echo "Total files processed: $PROCESSED_COUNT"
         echo ""
         echo "Recent conversions:"
-        $JOURNALCTL_CMD -u "$SERVICE_NAME" | grep "Successfully converted" | tail -5
+        $JOURNALCTL_CMD -u "$SERVICE_NAME" | grep "Successfully converted" | tail -5 || echo "(none yet)"
     else
-        echo "No processed files database found"
+        echo "No processed files database found at $STATE_DIR/processed.json"
     fi
 
     echo ""
     echo "=== Current Status ==="
-    $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager | grep -E "(Active:|Tasks:|Memory:|CPU:)" || true
+    $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager | grep -E "(Active:|Tasks:|Memory:|CPU:)" || echo "Service inactive or not available"
 }
 
 case "${1:-}" in
     start)
-        echo "Starting $SERVICE_TYPE service..."
+        echo "Starting service..."
         $SYSTEMCTL_CMD start "$SERVICE_NAME"
         sleep 1
         $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager
         ;;
 
     stop)
-        echo "Stopping $SERVICE_TYPE service..."
+        echo "Stopping service..."
         $SYSTEMCTL_CMD stop "$SERVICE_NAME"
         ;;
 
     restart)
-        echo "Restarting $SERVICE_TYPE service..."
+        echo "Restarting service..."
         $SYSTEMCTL_CMD restart "$SERVICE_NAME"
         sleep 1
         $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager
@@ -100,13 +86,13 @@ case "${1:-}" in
         ;;
 
     enable)
-        echo "Enabling $SERVICE_TYPE service..."
+        echo "Enabling service..."
         $SYSTEMCTL_CMD enable "$SERVICE_NAME"
         echo "Service will start automatically on boot"
         ;;
 
     disable)
-        echo "Disabling $SERVICE_TYPE service..."
+        echo "Disabling service..."
         $SYSTEMCTL_CMD disable "$SERVICE_NAME"
         echo "Service will not start automatically on boot"
         ;;
@@ -120,14 +106,11 @@ case "${1:-}" in
         echo "All files will be considered unprocessed and may be re-converted."
         read -p "Are you sure? (yes/no): " CONFIRM
         if [ "$CONFIRM" = "yes" ]; then
-            # Determine work directory based on install type
-            if [ "$SERVICE_TYPE" = "system" ]; then
-                WORK_DIR="/var/lib/video-converter/work"
-            else
-                WORK_DIR="$HOME/.local/var/lib/video-converter/work"
-            fi
-            rm -f "$WORK_DIR/processed.json"
+            STATE_DIR="/var/lib/video-converter"
+            sudo rm -f "$STATE_DIR/processed.json"
             echo "Database reset complete"
+            echo "Restarting service..."
+            $SYSTEMCTL_CMD restart "$SERVICE_NAME"
         else
             echo "Cancelled"
         fi
@@ -135,12 +118,20 @@ case "${1:-}" in
 
     test)
         echo "Running in test mode (Ctrl+C to stop)..."
-        cd "$SCRIPT_DIR"
-        python3 video_converter_daemon.py config.yaml
+        # Use FHS paths for test
+        CONFIG_PATH="/etc/video-converter/config.yaml"
+        if [ ! -f "$CONFIG_PATH" ]; then
+            echo "ERROR: Config file not found at $CONFIG_PATH"
+            echo "Install the daemon first with: sudo ./install.sh"
+            exit 1
+        fi
+        sudo /usr/local/bin/video_converter_daemon.py --config "$CONFIG_PATH" --dry-run
         ;;
 
     config)
-        ${EDITOR:-nano} "$SCRIPT_DIR/$CONFIG_FILE"
+        EDITOR="${EDITOR:-nano}"
+        echo "Opening configuration file..."
+        sudo "$EDITOR" "$CONFIG_FILE"
         read -p "Restart service to apply changes? (y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
