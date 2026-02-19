@@ -130,6 +130,7 @@ class VideoConverterDaemon:
 
         self.setup_logging()
         self.processed_files = self.load_processed_files()
+        self.conversion_times = {}  # Map of hash -> {timestamp, duration_seconds}
         self.converting = set()
         self._converting_lock = threading.Lock()
         self._processed_lock = threading.Lock()
@@ -288,35 +289,63 @@ class VideoConverterDaemon:
         self.logger = logging.getLogger('VideoConverter')
 
     def load_processed_files(self) -> Set[str]:
-        """Load list of already processed files"""
+        """Load list of already processed files
+
+        Supports both old format (list of hashes) and new format (dict with metadata)
+        Also loads conversion timing data into self.conversion_times
+        """
         state_dir = self.config['processing'].get('state_dir', DEFAULT_STATE_DIR)
         db_file = Path(state_dir) / 'processed.json'
         if db_file.exists():
             with open(db_file, 'r') as f:
                 data = json.load(f)
-                # Security: Validate that loaded data is a list of strings
-                if not isinstance(data, list):
+
+                # Support both old format (list) and new format (dict)
+                if isinstance(data, dict):
+                    # New format: {hash: {timestamp, duration_seconds}}
+                    hashes = set(data.keys())
+                    # Validate hashes and load timing data
+                    for hash_val, metadata in data.items():
+                        if not isinstance(hash_val, str) or not re.match(r'^[a-f0-9]{64}$', hash_val):
+                            self.logger.warning("processed.json contains invalid hash, resetting")
+                            return set()
+                        # Store timing data if available
+                        if isinstance(metadata, dict) and isinstance(metadata.get('timestamp'), (int, float)):
+                            self.conversion_times[hash_val] = metadata
+                    return hashes
+                elif isinstance(data, list):
+                    # Old format: list of hashes - will be converted to new format on save
+                    for item in data:
+                        if not isinstance(item, str) or not re.match(r'^[a-f0-9]{64}$', item):
+                            self.logger.warning("processed.json contains invalid hash, resetting")
+                            return set()
+                    return set(data)
+                else:
                     self.logger.warning("processed.json has invalid format, resetting")
                     return set()
-                for item in data:
-                    if not isinstance(item, str) or not re.match(r'^[a-f0-9]{64}$', item):
-                        self.logger.warning("processed.json contains invalid hash, resetting")
-                        return set()
-                return set(data)
         return set()
 
     def save_processed_files(self):
-        """Save list of processed files atomically to prevent corruption"""
+        """Save list of processed files with timing data atomically to prevent corruption"""
         state_dir = self.config['processing'].get('state_dir', DEFAULT_STATE_DIR)
         db_file = Path(state_dir) / 'processed.json'
         tmp_file = db_file.with_suffix('.json.tmp')
 
         with self._processed_lock:
             try:
+                # Build data structure with timing information
+                data = {}
+                for file_hash in self.processed_files:
+                    if file_hash in self.conversion_times:
+                        data[file_hash] = self.conversion_times[file_hash]
+                    else:
+                        # For legacy hashes without timing data, just store timestamp
+                        data[file_hash] = {"timestamp": int(time.time())}
+
                 # Security: Write to temp file first, then atomic rename
                 fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, 'w') as f:
-                    json.dump(list(self.processed_files), f, indent=2)
+                    json.dump(data, f, indent=2)
                 os.replace(str(tmp_file), str(db_file))
             except Exception:
                 # Clean up temp file on failure
@@ -466,6 +495,7 @@ class VideoConverterDaemon:
         """
         file_hash = self.get_file_hash(str(video_path))
         work_dir = Path(self.config['processing']['work_dir'])
+        start_time = time.time()
 
         try:
             with self._converting_lock:
@@ -479,6 +509,12 @@ class VideoConverterDaemon:
                 self.logger.info("[DRY-RUN] Would output to: %s", video_path.with_suffix('.m4v'))
                 with self._processed_lock:
                     self.processed_files.add(file_hash)
+                    # Store timing even for dry-run
+                    self.conversion_times[file_hash] = {
+                        "timestamp": int(start_time),
+                        "duration_seconds": int(time.time() - start_time),
+                        "dry_run": True
+                    }
                 self.save_processed_files()
                 return True
 
@@ -550,12 +586,17 @@ class VideoConverterDaemon:
                 except Exception as e:
                     self.logger.error("Failed to delete original: %s", e)
 
-            # Mark as processed
+            # Mark as processed with timing data
+            duration = int(time.time() - start_time)
             with self._processed_lock:
                 self.processed_files.add(file_hash)
+                self.conversion_times[file_hash] = {
+                    "timestamp": int(start_time),
+                    "duration_seconds": duration
+                }
             self.save_processed_files()
 
-            self.logger.info("Successfully converted: %s", video_path)
+            self.logger.info("Successfully converted: %s (took %d seconds)", video_path, duration)
             return True
 
         except subprocess.TimeoutExpired:

@@ -8,6 +8,8 @@ WorkingDirectory=/var/lib/video-converter
 ExecStart=/usr/local/bin/video_converter_daemon.py --config /etc/video-converter/config.yaml
 Restart=on-failure
 RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
 StandardOutput=journal
 StandardError=journal
 

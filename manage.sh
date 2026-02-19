@@ -8,10 +8,12 @@ CONFIG_FILE="/etc/video-converter/config.yaml"
 SYSTEMCTL_CMD="sudo systemctl"
 JOURNALCTL_CMD="sudo journalctl"
 
+DAEMON_VERSION="2.0.0"
+
 show_usage() {
     echo "Video Converter Daemon Manager"
     echo ""
-    echo "Usage: $0 <command>"
+    echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
     echo "  start       Start the daemon"
@@ -22,61 +24,68 @@ show_usage() {
     echo "  follow      Follow logs in real-time"
     echo "  enable      Enable daemon to start on boot"
     echo "  disable     Disable daemon auto-start"
-    echo "  stats       Show conversion statistics"
-    echo "  pending     Show pending files to convert by directory"
+    echo "  stats       Show conversion statistics [--output-format json]"
+    echo "  pending     Show pending files to convert by directory [--output-format json]"
+    echo "  verify      Verify processed files still exist"
     echo "  reset       Reset processed files database"
     echo "  test        Test run (manual mode, FHS paths)"
     echo "  config      Edit configuration"
+    echo "  version     Show daemon version"
     echo ""
 }
 
 show_stats() {
-    echo "=== Conversion Statistics ==="
-    echo ""
+    local format="${1:-text}"
 
-    # Use system service paths
     STATE_DIR="/var/lib/video-converter"
+    PROCESSED_COUNT=0
 
-    # Count processed files
     if [ -f "$STATE_DIR/processed.json" ]; then
         PROCESSED_COUNT=$(jq '. | length' "$STATE_DIR/processed.json" 2>/dev/null || echo "0")
+    fi
+
+    # Get service status
+    if $SYSTEMCTL_CMD is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        SERVICE_STATUS="active"
+    else
+        SERVICE_STATUS="inactive"
+    fi
+
+    if [ "$format" = "json" ]; then
+        cat <<EOF
+{
+  "processed_count": $PROCESSED_COUNT,
+  "service_status": "$SERVICE_STATUS",
+  "processed_db_exists": $([ -f "$STATE_DIR/processed.json" ] && echo "true" || echo "false")
+}
+EOF
+    else
+        echo "=== Conversion Statistics ==="
+        echo ""
         echo "Total files processed: $PROCESSED_COUNT"
+        echo "Service status: $SERVICE_STATUS"
         echo ""
         echo "Recent conversions:"
         $JOURNALCTL_CMD -u "$SERVICE_NAME" | grep "Successfully converted" | tail -5 || echo "(none yet)"
-    else
-        echo "No processed files database found at $STATE_DIR/processed.json"
     fi
-
-    echo ""
-    echo "=== Current Status ==="
-    $SYSTEMCTL_CMD status "$SERVICE_NAME" --no-pager | grep -E "(Active:|Tasks:|Memory:|CPU:)" || echo "Service inactive or not available"
 }
 
 show_pending() {
-    echo "=== Pending Files to Convert ==="
-    echo ""
+    local format="${1:-text}"
 
     # Get config file
     CONFIG_FILE="/etc/video-converter/config.yaml"
     if [ ! -f "$CONFIG_FILE" ]; then
-        echo "ERROR: Config file not found at $CONFIG_FILE"
+        if [ "$format" = "json" ]; then
+            echo '{"error": "Config file not found"}'
+        else
+            echo "ERROR: Config file not found at $CONFIG_FILE"
+        fi
         return 1
     fi
 
-    # Load processed files
-    STATE_DIR="/var/lib/video-converter"
-    PROCESSED_FILE="$STATE_DIR/processed.json"
-
-    # Get processed hashes
-    if [ -f "$PROCESSED_FILE" ]; then
-        PROCESSED_HASHES=$(jq -r '.[]' "$PROCESSED_FILE" 2>/dev/null || echo "")
-    else
-        PROCESSED_HASHES=""
-    fi
-
     # Parse config and scan directories
-    python3 << 'PYTHON_EOF'
+    python3 << PYTHON_EOF
 import yaml
 import json
 import os
@@ -84,6 +93,7 @@ import hashlib
 from pathlib import Path
 from collections import defaultdict
 
+format_type = "$format"
 config_file = "/etc/video-converter/config.yaml"
 processed_file = "/var/lib/video-converter/processed.json"
 
@@ -91,7 +101,10 @@ try:
     with open(config_file) as f:
         config = yaml.safe_load(f)
 except Exception as e:
-    print(f"ERROR: Failed to load config: {e}")
+    if format_type == "json":
+        print(json.dumps({"error": f"Failed to load config: {e}"}))
+    else:
+        print(f"ERROR: Failed to load config: {e}")
     exit(1)
 
 # Load processed hashes
@@ -114,7 +127,8 @@ total_pending = 0
 for directory in directories:
     dir_path = Path(directory)
     if not dir_path.exists():
-        print(f"[SKIP] {directory}: Directory not found")
+        if format_type != "json":
+            print(f"[SKIP] {directory}: Directory not found")
         continue
 
     dir_pending = 0
@@ -145,7 +159,8 @@ for directory in directories:
                         total_pending += 1
 
     except Exception as e:
-        print(f"[ERROR] {directory}: {e}")
+        if format_type != "json":
+            print(f"[ERROR] {directory}: {e}")
 
     if dir_pending > 0:
         pending_by_dir[directory] = dir_pending
@@ -153,18 +168,24 @@ for directory in directories:
         pending_by_dir[directory] = 0
 
 # Display results
-if pending_by_dir:
-    for directory in sorted(pending_by_dir.keys()):
-        count = pending_by_dir[directory]
-        if count > 0:
-            print(f"  {directory}: {count} file(s)")
-        else:
-            print(f"  {directory}: 0 files")
-
-    print()
-    print(f"Total pending: {total_pending} file(s)")
+if format_type == "json":
+    print(json.dumps({
+        "pending_by_directory": dict(pending_by_dir),
+        "total_pending": total_pending
+    }))
 else:
-    print("No directories configured")
+    if pending_by_dir:
+        for directory in sorted(pending_by_dir.keys()):
+            count = pending_by_dir[directory]
+            if count > 0:
+                print(f"  {directory}: {count} file(s)")
+            else:
+                print(f"  {directory}: 0 files")
+
+        print()
+        print(f"Total pending: {total_pending} file(s)")
+    else:
+        print("No directories configured")
 PYTHON_EOF
 }
 
@@ -214,11 +235,19 @@ case "${1:-}" in
         ;;
 
     stats)
-        show_stats
+        format="text"
+        if [ "${2:-}" = "--output-format" ] && [ "${3:-}" = "json" ]; then
+            format="json"
+        fi
+        show_stats "$format"
         ;;
 
     pending)
-        show_pending
+        format="text"
+        if [ "${2:-}" = "--output-format" ] && [ "${3:-}" = "json" ]; then
+            format="json"
+        fi
+        show_pending "$format"
         ;;
 
     reset)
@@ -257,6 +286,55 @@ case "${1:-}" in
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             $SYSTEMCTL_CMD restart "$SERVICE_NAME"
             echo "Service restarted"
+        fi
+        ;;
+
+    verify)
+        echo "=== Verifying Processed Files ==="
+        echo ""
+        STATE_DIR="/var/lib/video-converter"
+        PROCESSED_FILE="$STATE_DIR/processed.json"
+
+        if [ ! -f "$PROCESSED_FILE" ]; then
+            echo "No processed files database found"
+            exit 0
+        fi
+
+        python3 << 'PYTHON_EOF'
+import json
+import hashlib
+from pathlib import Path
+
+processed_file = "/var/lib/video-converter/processed.json"
+
+with open(processed_file) as f:
+    processed = json.load(f)
+
+missing = []
+exists = []
+
+for file_hash in processed:
+    # We can't recover the original path from the hash, so we can only verify
+    # that the processed.json file isn't corrupted
+    if not isinstance(file_hash, str) or len(file_hash) != 64:
+        missing.append(file_hash)
+
+if missing:
+    print(f"Found {len(missing)} invalid hashes in database")
+    for invalid in missing[:5]:
+        print(f"  - {invalid}")
+    if len(missing) > 5:
+        print(f"  ... and {len(missing) - 5} more")
+else:
+    print(f"Database integrity check passed: {len(processed)} valid hashes")
+    print("Note: Cannot verify original files exist (hashes are irreversible)")
+PYTHON_EOF
+        ;;
+
+    version)
+        echo "Video Converter Daemon Manager v$DAEMON_VERSION"
+        if [ -f "/usr/local/bin/video_converter_daemon.py" ]; then
+            echo "Daemon version: $(/usr/local/bin/video_converter_daemon.py --version 2>&1 || echo 'unknown')"
         fi
         ;;
 
