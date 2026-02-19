@@ -1729,3 +1729,520 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert 'Configuration error' in captured.out
+
+
+# ============================================================================
+# REMOTE MODE TESTS (all mock paramiko — no real SSH)
+# ============================================================================
+
+
+def _make_remote_config(tmp_path, remote_overrides=None):
+    """Helper to create a config dict with remote section enabled."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "daemon.log"
+
+    remote = {
+        'enabled': True,
+        'host': 'nas01',
+        'user': 'root',
+        'port': 22,
+        'key_file': '/root/.ssh/id_ed25519',
+        'directories': ['/media', '/mnt/smallmedia'],
+        'connect_timeout': 30,
+        'transfer_timeout': 3600,
+    }
+    if remote_overrides:
+        remote.update(remote_overrides)
+
+    config = {
+        'directories': [str(tmp_path)],
+        'remote': remote,
+        'conversion': {
+            'codec': 'libx264',
+            'crf': 23,
+            'preset': 'medium',
+            'audio_codec': 'aac',
+            'audio_bitrate': '128k',
+            'extra_options': [],
+        },
+        'processing': {
+            'work_dir': str(work_dir),
+            'state_dir': str(state_dir),
+            'include_extensions': ['mp4', 'mkv'],
+            'exclude_patterns': [],
+            'keep_original': True,
+        },
+        'daemon': {
+            'log_level': 'INFO',
+            'log_file': str(log_file),
+            'scan_interval': 300,
+            'max_workers': 2,
+        },
+    }
+    return config
+
+
+def _write_config(tmp_path, config):
+    """Write config dict to a YAML file and return its path."""
+    import yaml
+    config_file = tmp_path / "config.yaml"
+    with open(config_file, 'w') as f:
+        yaml.dump(config, f)
+    return str(config_file)
+
+
+class TestRemoteConfigValidation:
+    """Test remote configuration validation"""
+
+    def test_valid_remote_config(self, tmp_path):
+        """Test valid remote config passes validation"""
+        config = _make_remote_config(tmp_path)
+        config_file = _write_config(tmp_path, config)
+        daemon = VideoConverterDaemon(config_file, validate_only=True)
+        assert daemon._is_remote_mode() is True
+
+    def test_remote_missing_host(self, tmp_path):
+        """Test missing remote.host is rejected"""
+        config = _make_remote_config(tmp_path, {'host': ''})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.host"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_missing_user(self, tmp_path):
+        """Test missing remote.user is rejected"""
+        config = _make_remote_config(tmp_path, {'user': ''})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.user"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_bad_port(self, tmp_path):
+        """Test invalid remote.port is rejected"""
+        config = _make_remote_config(tmp_path, {'port': 70000})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.port"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_port_zero(self, tmp_path):
+        """Test remote.port=0 is rejected"""
+        config = _make_remote_config(tmp_path, {'port': 0})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.port"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_relative_key_file(self, tmp_path):
+        """Test relative key_file path is rejected"""
+        config = _make_remote_config(tmp_path, {'key_file': './id_rsa'})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.key_file"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_empty_directories(self, tmp_path):
+        """Test empty remote.directories is rejected"""
+        config = _make_remote_config(tmp_path, {'directories': []})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.directories"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_relative_directory(self, tmp_path):
+        """Test relative remote directory path is rejected"""
+        config = _make_remote_config(tmp_path, {'directories': ['relative/path']})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.directories"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_connect_timeout_too_low(self, tmp_path):
+        """Test connect_timeout < 1 is rejected"""
+        config = _make_remote_config(tmp_path, {'connect_timeout': 0})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.connect_timeout"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_transfer_timeout_too_low(self, tmp_path):
+        """Test transfer_timeout < 60 is rejected"""
+        config = _make_remote_config(tmp_path, {'transfer_timeout': 10})
+        config_file = _write_config(tmp_path, config)
+        with pytest.raises(ConfigValidationError, match="remote.transfer_timeout"):
+            VideoConverterDaemon(config_file, validate_only=True)
+
+    def test_remote_disabled_skips_validation(self, tmp_path):
+        """Test disabled remote section doesn't trigger remote validation"""
+        config = _make_remote_config(tmp_path, {'enabled': False, 'host': ''})
+        config_file = _write_config(tmp_path, config)
+        # Should not raise — remote validation skipped when enabled=False
+        daemon = VideoConverterDaemon(config_file, validate_only=True)
+        assert daemon._is_remote_mode() is False
+
+
+class TestRemotePathValidation:
+    """Test remote path validation via validate_remote_path"""
+
+    def test_normal_path_accepted(self):
+        """Test normal path within allowed dir is accepted"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('/media/movies/file.mkv', ['/media']) is True
+
+    def test_traversal_rejected(self):
+        """Test path traversal with '..' is rejected"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('/media/../etc/passwd', ['/media']) is False
+
+    def test_relative_path_rejected(self):
+        """Test relative path is rejected"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('media/file.mkv', ['/media']) is False
+
+    def test_exact_dir_match(self):
+        """Test exact directory match is accepted"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('/media', ['/media']) is True
+
+    def test_outside_allowed_dir(self):
+        """Test path outside allowed dirs is rejected"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('/etc/passwd', ['/media']) is False
+
+    def test_multiple_allowed_dirs(self):
+        """Test path in second allowed dir is accepted"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('/mnt/data/file.mp4', ['/media', '/mnt/data']) is True
+
+    def test_partial_dir_name_rejected(self):
+        """Test that /media2 is not matched by /media"""
+        from sftp_ops import validate_remote_path
+        assert validate_remote_path('/media2/file.mp4', ['/media']) is False
+
+
+class TestRemoteDiscovery:
+    """Test remote video discovery with mocked SFTP"""
+
+    @pytest.fixture
+    def remote_daemon(self, tmp_path):
+        """Create a daemon with remote mode and mocked SFTP connection"""
+        config = _make_remote_config(tmp_path)
+        config_file = _write_config(tmp_path, config)
+
+        with patch('video_converter_daemon.VideoConverterDaemon._init_remote'):
+            daemon = VideoConverterDaemon(config_file)
+
+        # Set up mock SFTP connection
+        daemon._sftp_conn = MagicMock()
+        return daemon
+
+    def test_discover_remote_videos(self, remote_daemon):
+        """Test remote discovery returns validated file list"""
+        with patch('sftp_ops.sftp_list_videos') as mock_list:
+            mock_list.return_value = [
+                '/media/movies/film.mkv',
+                '/media/shows/ep01.mp4',
+            ]
+            with patch('sftp_ops.validate_remote_path', return_value=True):
+                videos = remote_daemon.discover_videos()
+
+                assert len(videos) == 2
+                assert '/media/movies/film.mkv' in videos
+
+    def test_discover_remote_filters_unsafe_paths(self, remote_daemon):
+        """Test remote discovery filters out paths failing validation"""
+        with patch('sftp_ops.sftp_list_videos') as mock_list:
+            mock_list.return_value = [
+                '/media/good.mkv',
+                '/etc/passwd',
+            ]
+            with patch('sftp_ops.validate_remote_path') as mock_validate:
+                mock_validate.side_effect = lambda p, d: p.startswith('/media')
+                videos = remote_daemon.discover_videos()
+
+                assert len(videos) == 1
+                assert '/media/good.mkv' in videos
+
+    def test_discover_remote_sftp_error(self, remote_daemon):
+        """Test remote discovery handles SFTP errors gracefully"""
+        remote_daemon._sftp_conn.ensure_connected.side_effect = Exception("Connection lost")
+
+        videos = remote_daemon.discover_videos()
+        assert len(videos) == 0
+
+
+class TestRemoteShouldProcess:
+    """Test remote should_process logic"""
+
+    @pytest.fixture
+    def remote_daemon(self, tmp_path):
+        """Create a daemon with remote mode and mocked SFTP"""
+        config = _make_remote_config(tmp_path)
+        config_file = _write_config(tmp_path, config)
+
+        with patch('video_converter_daemon.VideoConverterDaemon._init_remote'):
+            daemon = VideoConverterDaemon(config_file)
+
+        daemon._sftp_conn = MagicMock()
+        return daemon
+
+    def test_already_processed_skipped(self, remote_daemon):
+        """Test already-processed file is skipped"""
+        video = '/media/movies/film.mkv'
+        file_hash = remote_daemon.get_file_hash(video)
+        remote_daemon.processed_files.add(file_hash)
+
+        assert remote_daemon.should_process(video) is False
+
+    def test_m4v_skipped(self, remote_daemon):
+        """Test .m4v files are skipped"""
+        assert remote_daemon.should_process('/media/already.m4v') is False
+
+    def test_output_exists_skipped(self, remote_daemon):
+        """Test file with existing output on remote is skipped"""
+        with patch('sftp_ops.sftp_exists', return_value=True):
+            with patch('sftp_ops.sftp_stat', return_value=(1024, 1000.0)):
+                assert remote_daemon.should_process('/media/film.mkv') is False
+
+    def test_oversized_file_skipped(self, remote_daemon):
+        """Test oversized remote file is skipped"""
+        with patch('sftp_ops.sftp_exists', return_value=False):
+            with patch('sftp_ops.sftp_stat', return_value=(200 * 1024**3, 1000.0)):
+                assert remote_daemon.should_process('/media/huge.mkv') is False
+
+    def test_empty_file_skipped(self, remote_daemon):
+        """Test empty remote file is skipped"""
+        with patch('sftp_ops.sftp_exists', return_value=False):
+            with patch('sftp_ops.sftp_stat', return_value=(0, 1000.0)):
+                assert remote_daemon.should_process('/media/empty.mkv') is False
+
+    def test_valid_file_accepted(self, remote_daemon):
+        """Test valid remote file passes should_process"""
+        with patch('sftp_ops.sftp_exists', return_value=False):
+            with patch('sftp_ops.sftp_stat', return_value=(1024 * 1024, 1000.0)):
+                assert remote_daemon.should_process('/media/good.mkv') is True
+
+
+class TestRemoteConversion:
+    """Test remote conversion workflow with mocked SFTP and FFmpeg"""
+
+    @pytest.fixture
+    def remote_daemon(self, tmp_path):
+        """Create a daemon with remote mode and mocked SFTP"""
+        config = _make_remote_config(tmp_path)
+        config_file = _write_config(tmp_path, config)
+
+        with patch('video_converter_daemon.VideoConverterDaemon._init_remote'):
+            daemon = VideoConverterDaemon(config_file)
+
+        daemon._sftp_conn = MagicMock()
+        return daemon
+
+    def test_remote_conversion_happy_path(self, remote_daemon, tmp_path):
+        """Test successful remote conversion: download, convert, upload"""
+        work_dir = Path(remote_daemon.config['processing']['work_dir'])
+        video_path = '/media/movies/film.mkv'
+        file_hash = remote_daemon.get_file_hash(video_path)
+
+        def fake_download(conn, remote, local, timeout):
+            Path(local).write_bytes(b"video data")
+
+        def fake_ffmpeg(*args, **kwargs):
+            output_file = work_dir / f"{file_hash}_output.m4v"
+            output_file.write_bytes(b"converted data")
+            return MagicMock(returncode=0)
+
+        with patch('sftp_ops.sftp_download', side_effect=fake_download):
+            with patch('sftp_ops.validate_remote_path', return_value=True):
+                with patch('subprocess.run', side_effect=fake_ffmpeg):
+                    with patch('sftp_ops.sftp_upload') as mock_upload:
+                        with patch('sftp_ops.sftp_stat', return_value=(1024, 1000.0)):
+                            with patch('sftp_ops.sftp_utime'):
+                                result = remote_daemon.convert_video(video_path)
+
+                                assert result is True
+                                mock_upload.assert_called_once()
+                                assert file_hash in remote_daemon.processed_files
+
+    def test_remote_conversion_download_fails(self, remote_daemon):
+        """Test remote conversion handles download failure"""
+        from sftp_ops import SFTPOperationError
+
+        with patch('sftp_ops.validate_remote_path', return_value=True):
+            with patch('sftp_ops.sftp_download') as mock_dl:
+                mock_dl.side_effect = SFTPOperationError("Download failed")
+
+                result = remote_daemon.convert_video('/media/movies/film.mkv')
+                assert result is False
+
+    def test_remote_conversion_ffmpeg_fails(self, remote_daemon, tmp_path):
+        """Test remote conversion handles FFmpeg failure"""
+        def fake_download(conn, remote, local, timeout):
+            Path(local).write_bytes(b"video data")
+
+        with patch('sftp_ops.validate_remote_path', return_value=True):
+            with patch('sftp_ops.sftp_download', side_effect=fake_download):
+                with patch('subprocess.run') as mock_run:
+                    mock_run.return_value = MagicMock(returncode=1, stderr="FFmpeg error")
+
+                    result = remote_daemon.convert_video('/media/movies/film.mkv')
+                    assert result is False
+
+    def test_remote_conversion_upload_fails(self, remote_daemon, tmp_path):
+        """Test remote conversion handles upload failure and cleans up"""
+        from sftp_ops import SFTPOperationError
+        work_dir = Path(remote_daemon.config['processing']['work_dir'])
+        video_path = '/media/movies/film.mkv'
+        file_hash = remote_daemon.get_file_hash(video_path)
+
+        def fake_download(conn, remote, local, timeout):
+            Path(local).write_bytes(b"video data")
+
+        def fake_ffmpeg(*args, **kwargs):
+            output_file = work_dir / f"{file_hash}_output.m4v"
+            output_file.write_bytes(b"converted data")
+            return MagicMock(returncode=0)
+
+        with patch('sftp_ops.validate_remote_path', return_value=True):
+            with patch('sftp_ops.sftp_download', side_effect=fake_download):
+                with patch('subprocess.run', side_effect=fake_ffmpeg):
+                    with patch('sftp_ops.sftp_upload') as mock_upload:
+                        mock_upload.side_effect = SFTPOperationError("Upload failed")
+
+                        result = remote_daemon.convert_video(video_path)
+                        assert result is False
+
+                        # Verify temp files cleaned up
+                        local_input = work_dir / f"{file_hash}_input.mkv"
+                        local_output = work_dir / f"{file_hash}_output.m4v"
+                        assert not local_input.exists()
+                        assert not local_output.exists()
+
+    def test_remote_conversion_path_validation_fails(self, remote_daemon):
+        """Test remote conversion rejects invalid paths"""
+        with patch('sftp_ops.validate_remote_path', return_value=False):
+            result = remote_daemon.convert_video('/media/../etc/passwd')
+            assert result is False
+
+    def test_remote_dry_run(self, remote_daemon):
+        """Test remote dry-run mode marks processed without actual work"""
+        remote_daemon.dry_run = True
+        video_path = '/media/movies/film.mkv'
+
+        result = remote_daemon.convert_video(video_path)
+        assert result is True
+
+        file_hash = remote_daemon.get_file_hash(video_path)
+        assert file_hash in remote_daemon.processed_files
+        assert remote_daemon.conversion_times[file_hash].get('dry_run') is True
+
+
+class TestLocalModeUnchanged:
+    """Verify local mode is not affected by remote mode additions"""
+
+    @pytest.fixture
+    def local_daemon(self, tmp_path):
+        """Create a daemon without remote config (local mode)"""
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        log_file = log_dir / "daemon.log"
+
+        config = {
+            'directories': [str(tmp_path)],
+            'conversion': {
+                'codec': 'libx264',
+                'crf': 23,
+                'preset': 'medium',
+                'audio_codec': 'aac',
+                'audio_bitrate': '128k',
+                'extra_options': [],
+            },
+            'processing': {
+                'work_dir': str(work_dir),
+                'state_dir': str(state_dir),
+                'include_extensions': ['mp4'],
+                'exclude_patterns': [],
+                'keep_original': True,
+            },
+            'daemon': {
+                'log_level': 'INFO',
+                'log_file': str(log_file),
+                'scan_interval': 300,
+                'max_workers': 2,
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        import yaml
+        with open(config_file, 'w') as f:
+            yaml.dump(config, f)
+
+        return VideoConverterDaemon(str(config_file))
+
+    def test_local_mode_is_not_remote(self, local_daemon):
+        """Test daemon without remote config is in local mode"""
+        assert local_daemon._is_remote_mode() is False
+        assert local_daemon._sftp_conn is None
+
+    def test_local_discover_videos_works(self, local_daemon, tmp_path):
+        """Test local discovery still works unchanged"""
+        video = tmp_path / "test.mp4"
+        video.touch()
+
+        videos = local_daemon.discover_videos()
+        assert any('test.mp4' in str(v) for v in videos)
+
+    def test_local_should_process_works(self, local_daemon, tmp_path):
+        """Test local should_process still works unchanged"""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"data")
+
+        assert local_daemon.should_process(video) is True
+
+    def test_local_dry_run_conversion(self, tmp_path):
+        """Test local dry-run conversion still works"""
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        log_file = log_dir / "daemon.log"
+
+        config = {
+            'directories': [str(tmp_path)],
+            'conversion': {
+                'codec': 'libx264',
+                'crf': 23,
+                'preset': 'medium',
+                'audio_codec': 'aac',
+                'audio_bitrate': '128k',
+                'extra_options': [],
+            },
+            'processing': {
+                'work_dir': str(work_dir),
+                'state_dir': str(state_dir),
+                'include_extensions': ['mp4'],
+                'exclude_patterns': [],
+                'keep_original': True,
+            },
+            'daemon': {
+                'log_level': 'INFO',
+                'log_file': str(log_file),
+                'scan_interval': 300,
+                'max_workers': 2,
+            },
+        }
+
+        config_file = tmp_path / "config.yaml"
+        import yaml
+        with open(config_file, 'w') as f:
+            yaml.dump(config, f)
+
+        daemon = VideoConverterDaemon(str(config_file), dry_run=True)
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"video data")
+
+        result = daemon.convert_video(video)
+        assert result is True

@@ -64,6 +64,22 @@ processing:
     - "*.converting.*"
     - "*/.backup/*"
 
+# Remote mode: run daemon on conversion host, files on media host via SSH/SFTP
+# Uncomment and configure to enable. When enabled, the daemon discovers files
+# on the remote host via SFTP, downloads them, converts locally, and uploads results.
+# Requires: pip install paramiko>=3.0.0
+# remote:
+#   enabled: true
+#   host: "nas01"
+#   port: 22
+#   user: "root"
+#   key_file: "/root/.ssh/id_ed25519"
+#   directories:
+#     - "/media"
+#     - "/mnt/smallmedia"
+#   connect_timeout: 30       # SSH connection timeout (seconds)
+#   transfer_timeout: 3600    # Per-file transfer timeout (seconds)
+
 # Daemon settings
 daemon:
   # How often to scan for new files (seconds, minimum 30)
