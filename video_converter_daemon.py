@@ -121,6 +121,7 @@ class VideoConverterDaemon:
         """
         self.running = True
         self.dry_run = dry_run
+        self.conversion_times = {}  # Initialize early so load_processed_files can use it
         self.config = self.load_config(config_path)
         self.validate_config()
 
@@ -130,7 +131,6 @@ class VideoConverterDaemon:
 
         self.setup_logging()
         self.processed_files = self.load_processed_files()
-        self.conversion_times = {}  # Map of hash -> {timestamp, duration_seconds}
         self.converting = set()
         self._converting_lock = threading.Lock()
         self._processed_lock = threading.Lock()
