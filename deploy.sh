@@ -7,7 +7,7 @@ set -euo pipefail
 REMOTE_HOST="nas01"
 REMOTE_DIR="~/video-converter"
 
-echo "=== Deploying Video Converter Daemon to nas01 ==="
+echo "=== Deploying Video Converter Daemon to $REMOTE_HOST ==="
 echo ""
 
 # Create remote directory
