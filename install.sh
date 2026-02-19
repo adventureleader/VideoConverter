@@ -347,6 +347,39 @@ cp "$SOURCE_DIR/video_converter_daemon.py" /usr/local/bin/video_converter_daemon
 chmod 755 /usr/local/bin/video_converter_daemon.py
 echo "[OK] Daemon script installed to /usr/local/bin/video_converter_daemon.py"
 
+# Copy SFTP operations module (needed for remote mode)
+if [ -f "$SOURCE_DIR/sftp_ops.py" ]; then
+    cp "$SOURCE_DIR/sftp_ops.py" /usr/local/bin/sftp_ops.py
+    chmod 644 /usr/local/bin/sftp_ops.py
+    echo "[OK] SFTP operations module installed to /usr/local/bin/sftp_ops.py"
+fi
+
+# Install paramiko if remote mode is configured
+if python3 -c "
+import yaml, sys
+with open(sys.argv[1]) as f:
+    config = yaml.safe_load(f)
+remote = config.get('remote', {})
+sys.exit(0 if remote and remote.get('enabled') else 1)
+" "$SOURCE_DIR/config.yaml" 2>/dev/null; then
+    echo ""
+    echo "Remote mode detected in config, installing paramiko..."
+    if ! python3 -c "import paramiko" 2>/dev/null; then
+        if command -v apt &> /dev/null; then
+            apt install -y python3-paramiko || pip3 install --break-system-packages paramiko || pip3 install paramiko
+        else
+            pip3 install --break-system-packages paramiko || pip3 install paramiko
+        fi
+        if python3 -c "import paramiko" 2>/dev/null; then
+            echo "[OK] paramiko installed"
+        else
+            echo "[WARNING] Failed to install paramiko. Remote mode will not work."
+        fi
+    else
+        echo "[OK] paramiko already installed"
+    fi
+fi
+
 # Copy management script to /usr/local/bin
 echo ""
 echo "Installing management script..."

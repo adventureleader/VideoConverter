@@ -11,6 +11,7 @@ Automatically discovers and converts video files to .m4v format. Designed to run
 - **Daemon Service**: Runs continuously in the background as root
 - **FHS Compliant**: Uses standard Linux filesystem hierarchy paths
 - **Robust**: Handles errors gracefully and retries on failure
+- **Remote Mode**: Convert files on a remote NAS/media host via SSH/SFTP
 - **Security Hardened**: Input validation, path traversal prevention, systemd isolation
 
 ## Requirements
@@ -20,6 +21,7 @@ Automatically discovers and converts video files to .m4v format. Designed to run
 - PyYAML
 - systemd (for service management)
 - Root privileges (for universal file access)
+- paramiko (optional, only needed for remote mode)
 
 ## Installation
 
@@ -100,6 +102,46 @@ directories:
 - `keep_original`: Keep or delete source files after conversion
 - `max_workers`: Number of concurrent conversions (1-8)
 - `scan_interval`: How often to scan for new files (seconds, minimum 30)
+
+### Remote Mode (SSH/SFTP)
+
+Remote mode allows the daemon to run on a powerful conversion host while video files live on a separate media host (e.g., a NAS). The daemon discovers files on the remote host via SFTP, downloads them, converts locally with FFmpeg, and uploads the results back.
+
+```yaml
+remote:
+  enabled: true
+  host: "nas01"              # Remote hostname or IP
+  port: 22                   # SSH port (1-65535, default 22)
+  user: "root"               # SSH username
+  key_file: "/root/.ssh/id_ed25519"  # Path to SSH private key (absolute)
+  directories:               # Remote directories to scan
+    - "/media"
+    - "/mnt/smallmedia"
+  connect_timeout: 30        # SSH connection timeout in seconds (default 30)
+  transfer_timeout: 3600     # Per-file transfer timeout in seconds (default 3600)
+```
+
+**How it works:**
+1. Discovers video files on the remote host via SFTP
+2. Downloads each file to the local `work_dir`
+3. Converts locally with FFmpeg
+4. Uploads the `.m4v` result back to the remote host (atomic upload via temp file)
+5. Preserves original file timestamps
+6. Optionally deletes the original remote file (if `keep_original: false`)
+
+**Requirements for remote mode:**
+- `paramiko` Python package: `pip install paramiko>=3.0.0`
+- SSH key-based authentication configured between the conversion host and the media host
+- The install script will automatically install paramiko when remote mode is detected in the config
+
+**Security:**
+- SSH key authentication only (no passwords in config)
+- Remote path validation prevents directory traversal attacks
+- All operations are pure SFTP (no `ssh exec_command`)
+- Uploads use atomic temp-then-rename to prevent partial files
+- File size limits enforced before download
+
+When remote mode is disabled or the `remote` section is absent, the daemon operates in local mode exactly as before.
 
 ### FHS Paths
 
@@ -243,6 +285,7 @@ ls -la /var/log/video-converter/
 VideoConverter/
 ├── config.yaml                    # Configuration file
 ├── video_converter_daemon.py      # Main daemon script
+├── sftp_ops.py                    # SFTP operations module (remote mode)
 ├── video-converter.service        # Systemd service file
 ├── install.sh                     # Installation script
 ├── manage.sh                      # Management utility script
@@ -259,12 +302,24 @@ VideoConverter/
 
 ## How It Works
 
+### Local Mode (default)
+
 1. **Discovery**: Periodically scans configured directories for video files
 2. **Filtering**: Checks if files need processing (not already converted, not in progress)
 3. **Convert**: Uses FFmpeg to convert to .m4v in a temporary directory
 4. **Move**: Moves converted file to same directory as original
 5. **Cleanup**: Removes temporary files, optionally deletes original
 6. **Track**: Records processed files to avoid re-processing
+
+### Remote Mode (SSH/SFTP)
+
+1. **Discovery**: Lists video files on the remote host via SFTP
+2. **Filtering**: Checks remote file size, whether output exists on remote, etc.
+3. **Download**: Transfers the source file from remote to local `work_dir`
+4. **Convert**: Uses FFmpeg to convert locally
+5. **Upload**: Transfers the `.m4v` result back to the remote host (atomic)
+6. **Cleanup**: Removes local temp files, optionally deletes remote original
+7. **Track**: Records processed files locally to avoid re-processing
 
 ## Performance Tips
 
