@@ -24,6 +24,10 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 
+# I/O throttling
+IOAccounting=yes
+IOWeight=25
+
 # Resource limits
 LimitNOFILE=4096
 MemoryMax=4G

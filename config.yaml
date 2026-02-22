@@ -52,7 +52,6 @@ processing:
     - "wmv"
     - "mpg"
     - "mpeg"
-    - "m4v"
 
   # Skip files that match these patterns
   exclude_patterns:

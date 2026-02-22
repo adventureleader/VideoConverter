@@ -10,6 +10,7 @@ import sys
 import time
 import yaml
 import logging
+from logging.handlers import RotatingFileHandler
 import subprocess
 import hashlib
 import shutil
@@ -48,6 +49,10 @@ MAX_WORKERS_LIMIT = 8
 MAX_CONVERSION_TIMEOUT = 86400
 # Max file size for conversion: 100 GB
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024 * 1024
+# Minimum free disk space required before starting a conversion: 1 GB
+MIN_FREE_SPACE_BYTES = 1 * 1024 * 1024 * 1024
+# Maximum files to discover per scan to prevent memory exhaustion
+MAX_DISCOVERED_FILES = 10000
 
 # FHS-compliant default paths
 DEFAULT_CONFIG_PATH = '/etc/video-converter/config.yaml'
@@ -134,6 +139,20 @@ class VideoConverterDaemon:
         self.converting = set()
         self._converting_lock = threading.Lock()
         self._processed_lock = threading.Lock()
+
+        # Cache resolved allowed directories to avoid repeated resolve() calls
+        self._resolved_allowed_dirs = []
+        for d in self.config.get('directories', []):
+            try:
+                resolved = Path(d).resolve(strict=True)
+                if resolved.is_dir():
+                    self._resolved_allowed_dirs.append(resolved)
+            except OSError:
+                pass
+
+        # Discovery cache to avoid redundant full traversals
+        self._discovery_cache = []
+        self._cache_time = 0.0
 
         # Security: Create work directory with restrictive permissions
         work_dir = Path(self.config['processing']['work_dir'])
@@ -282,7 +301,9 @@ class VideoConverterDaemon:
             level=log_level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_file),
+                RotatingFileHandler(
+                    log_file, maxBytes=50*1024*1024, backupCount=5
+                ),
                 logging.StreamHandler()
             ]
         )
@@ -362,32 +383,51 @@ class VideoConverterDaemon:
         # Security: Use SHA-256 instead of MD5 (MD5 is cryptographically broken)
         return hashlib.sha256(file_path.encode()).hexdigest()
 
-    def _is_safe_path(self, path: Path, allowed_dirs: List[str]) -> bool:
+    def _is_safe_path(self, path: Path, allowed_dirs: List[str] = None) -> bool:
         """Verify a path resolves within one of the allowed directories.
 
         This prevents symlink-based path traversal attacks where a symlink
         inside a watched directory points outside of it.
+
+        Uses cached resolved directories when available for performance.
         """
         try:
             resolved = path.resolve(strict=True)
         except (OSError, ValueError):
             return False
 
-        for allowed_dir in allowed_dirs:
+        # Use cached resolved dirs if available, otherwise resolve on the fly
+        if hasattr(self, '_resolved_allowed_dirs') and self._resolved_allowed_dirs:
+            resolved_dirs = self._resolved_allowed_dirs
+        else:
+            resolved_dirs = []
+            for d in (allowed_dirs or []):
+                try:
+                    resolved_dirs.append(Path(d).resolve(strict=True))
+                except OSError:
+                    continue
+
+        for allowed_resolved in resolved_dirs:
             try:
-                allowed_resolved = Path(allowed_dir).resolve(strict=True)
-                # Check that the resolved path is under the allowed directory
                 resolved.relative_to(allowed_resolved)
                 return True
-            except (ValueError, OSError):
+            except ValueError:
                 continue
         return False
 
     def discover_videos(self) -> List[Path]:
-        """Discover video files in configured directories"""
+        """Discover video files in configured directories.
+
+        Uses a single os.walk() pass per directory instead of separate glob
+        calls per extension, reducing filesystem traversals from N*extensions
+        to N (one per directory).
+        """
         directories = self.config['directories']
         extensions = self.config['processing']['include_extensions']
         exclude_patterns = self.config['processing']['exclude_patterns']
+
+        # Build extension set once for O(1) lookups
+        ext_set = {f".{e.lower()}" for e in extensions}
 
         all_videos = []
 
@@ -411,11 +451,22 @@ class VideoConverterDaemon:
             self.logger.debug("Scanning %s", directory)
 
             try:
-                # Find all video files recursively
-                for ext in extensions:
-                    pattern = f"**/*.{ext}"
-                    for video_file in dir_path.glob(pattern):
-                        # Security: Only process regular files (not symlinks to outside dirs)
+                for dirpath, _dirnames, filenames in os.walk(str(resolved_dir)):
+                    for filename in filenames:
+                        if len(all_videos) >= MAX_DISCOVERED_FILES:
+                            self.logger.warning(
+                                "Discovery cap reached (%d files), stopping scan",
+                                MAX_DISCOVERED_FILES
+                            )
+                            break
+
+                        video_file = Path(dirpath) / filename
+
+                        # Check extension match
+                        if video_file.suffix.lower() not in ext_set:
+                            continue
+
+                        # Security: Only process regular files
                         if not video_file.is_file():
                             continue
 
@@ -436,6 +487,9 @@ class VideoConverterDaemon:
 
                         if not should_exclude:
                             all_videos.append(video_file)
+
+                    if len(all_videos) >= MAX_DISCOVERED_FILES:
+                        break
 
             except Exception as e:
                 self.logger.error("Exception scanning %s: %s", directory, e)
@@ -528,6 +582,28 @@ class VideoConverterDaemon:
                     "File path resolution changed (possible TOCTOU attack): %s",
                     video_path
                 )
+                return False
+
+            # Check disk space before starting conversion
+            try:
+                work_free = shutil.disk_usage(str(work_dir)).free
+                output_free = shutil.disk_usage(str(video_path.parent)).free
+                if work_free < MIN_FREE_SPACE_BYTES:
+                    self.logger.error(
+                        "Insufficient disk space in work_dir %s: %d MB free (need %d MB)",
+                        work_dir, work_free // (1024*1024),
+                        MIN_FREE_SPACE_BYTES // (1024*1024)
+                    )
+                    return False
+                if output_free < MIN_FREE_SPACE_BYTES:
+                    self.logger.error(
+                        "Insufficient disk space in output dir %s: %d MB free (need %d MB)",
+                        video_path.parent, output_free // (1024*1024),
+                        MIN_FREE_SPACE_BYTES // (1024*1024)
+                    )
+                    return False
+            except OSError as e:
+                self.logger.error("Cannot check disk space: %s", e)
                 return False
 
             # Generate output filename
@@ -692,8 +768,21 @@ class VideoConverterDaemon:
             try:
                 self.logger.info("Starting scan cycle...")
 
-                # Discover videos
-                videos = self.discover_videos()
+                # Use cached discovery results if cache is fresh and no work was pending
+                cache_max_age = scan_interval * 3
+                cache_age = time.time() - self._cache_time
+                if (self._discovery_cache
+                        and cache_age < cache_max_age
+                        and not any(self.should_process(v) for v in self._discovery_cache)):
+                    self.logger.debug(
+                        "Using cached discovery (%d files, %.0fs old)",
+                        len(self._discovery_cache), cache_age
+                    )
+                    videos = self._discovery_cache
+                else:
+                    videos = self.discover_videos()
+                    self._discovery_cache = videos
+                    self._cache_time = time.time()
 
                 # Process videos
                 self.process_batch(videos)
