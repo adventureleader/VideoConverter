@@ -65,7 +65,7 @@ daemon:
   scan_interval: 300
 
   # Maximum concurrent conversions (1-8)
-  max_workers: 2
+  max_workers: 1
 
   # Log file location (must be absolute path)
   log_file: "/var/log/video-converter/daemon.log"
