@@ -39,8 +39,13 @@ processing:
   # Separated from work_dir to isolate persistent state from temporary files
   state_dir: "/var/lib/video-converter"
 
+  # Minimum free disk space (in GB) required before starting a conversion
+  # Applies to both work_dir and output directory. Increase this if your root
+  # filesystem shares space with /boot to avoid GRUB corruption during updates.
+  min_free_space_gb: 10
+
   # After successful conversion
-  keep_original: true  # Set to false to delete originals
+  keep_original: false  # Set to false to delete originals
 
   # File patterns to include (validated against known video extensions)
   include_extensions:

@@ -49,8 +49,10 @@ MAX_WORKERS_LIMIT = 8
 MAX_CONVERSION_TIMEOUT = 86400
 # Max file size for conversion: 100 GB
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024 * 1024
-# Minimum free disk space required before starting a conversion: 1 GB
-MIN_FREE_SPACE_BYTES = 1 * 1024 * 1024 * 1024
+# Minimum free disk space limits (in GB)
+MIN_FREE_SPACE_GB_DEFAULT = 10
+MIN_FREE_SPACE_GB_MIN = 1
+MIN_FREE_SPACE_GB_MAX = 100
 # Maximum files to discover per scan to prevent memory exhaustion
 MAX_DISCOVERED_FILES = 10000
 
@@ -247,6 +249,16 @@ class VideoConverterDaemon:
         if not isinstance(scan_interval, (int, float)) or scan_interval < 30:
             raise ConfigValidationError(
                 f"Invalid scan_interval '{scan_interval}'. Must be >= 30 seconds."
+            )
+
+        # Validate min_free_space_gb
+        min_free_space_gb = proc.get('min_free_space_gb', MIN_FREE_SPACE_GB_DEFAULT)
+        if (not isinstance(min_free_space_gb, (int, float))
+                or min_free_space_gb < MIN_FREE_SPACE_GB_MIN
+                or min_free_space_gb > MIN_FREE_SPACE_GB_MAX):
+            raise ConfigValidationError(
+                f"Invalid min_free_space_gb '{min_free_space_gb}'. "
+                f"Must be {MIN_FREE_SPACE_GB_MIN}-{MIN_FREE_SPACE_GB_MAX}."
             )
 
         # Validate include_extensions against allowlist
@@ -585,21 +597,25 @@ class VideoConverterDaemon:
                 return False
 
             # Check disk space before starting conversion
+            min_free_gb = self.config['processing'].get(
+                'min_free_space_gb', MIN_FREE_SPACE_GB_DEFAULT
+            )
+            min_free_bytes = int(min_free_gb * 1024 * 1024 * 1024)
             try:
                 work_free = shutil.disk_usage(str(work_dir)).free
                 output_free = shutil.disk_usage(str(video_path.parent)).free
-                if work_free < MIN_FREE_SPACE_BYTES:
+                if work_free < min_free_bytes:
                     self.logger.error(
                         "Insufficient disk space in work_dir %s: %d MB free (need %d MB)",
                         work_dir, work_free // (1024*1024),
-                        MIN_FREE_SPACE_BYTES // (1024*1024)
+                        min_free_bytes // (1024*1024)
                     )
                     return False
-                if output_free < MIN_FREE_SPACE_BYTES:
+                if output_free < min_free_bytes:
                     self.logger.error(
                         "Insufficient disk space in output dir %s: %d MB free (need %d MB)",
                         video_path.parent, output_free // (1024*1024),
-                        MIN_FREE_SPACE_BYTES // (1024*1024)
+                        min_free_bytes // (1024*1024)
                     )
                     return False
             except OSError as e:
