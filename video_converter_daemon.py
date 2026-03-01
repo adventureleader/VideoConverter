@@ -2,7 +2,7 @@
 """
 Video Converter Daemon
 Automatically discovers and converts video files to .m4v format
-Designed to run locally on nas01
+Supports local mode (default) and remote mode via SSH/SFTP
 """
 
 import os
@@ -17,10 +17,11 @@ import shutil
 import re
 import threading
 import argparse
+import posixpath
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Union
 import signal
 import json
 
@@ -129,6 +130,7 @@ class VideoConverterDaemon:
         self.running = True
         self.dry_run = dry_run
         self.conversion_times = {}  # Initialize early so load_processed_files can use it
+        self._sftp_conn = None  # Initialize before validate_config may reference it
         self.config = self.load_config(config_path)
         self.validate_config()
 
@@ -160,11 +162,41 @@ class VideoConverterDaemon:
         work_dir = Path(self.config['processing']['work_dir'])
         work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+        # Initialize remote SFTP connection if remote mode is enabled
+        if self._is_remote_mode():
+            self._init_remote()
+
         # Register signal handlers
         signal.signal(signal.SIGTERM, self.handle_shutdown)
         signal.signal(signal.SIGINT, self.handle_shutdown)
 
-        self.logger.info("Video Converter Daemon initialized")
+        self.logger.info("Video Converter Daemon initialized%s",
+                         " (remote mode)" if self._is_remote_mode() else "")
+
+    def _is_remote_mode(self) -> bool:
+        """Check if remote mode is enabled in config."""
+        remote = self.config.get('remote', {})
+        return bool(remote and remote.get('enabled', False))
+
+    def _init_remote(self):
+        """Initialize remote SFTP connection (lazy import of paramiko)."""
+        try:
+            from sftp_ops import SFTPConnection
+        except ImportError:
+            raise ImportError(
+                "paramiko is required for remote mode. Install it with: pip install paramiko>=3.0.0"
+            )
+
+        remote = self.config['remote']
+        self._sftp_conn = SFTPConnection(
+            host=remote['host'],
+            user=remote['user'],
+            port=remote.get('port', 22),
+            key_file=remote.get('key_file'),
+            connect_timeout=remote.get('connect_timeout', 30),
+            custom_logger=self.logger,
+        )
+        self._sftp_conn.connect()
 
     def load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file"""
@@ -299,6 +331,68 @@ class VideoConverterDaemon:
                 f"log_file '{log_file}' must be an absolute path."
             )
 
+        # Validate remote section (if enabled)
+        remote = self.config.get('remote', {})
+        if remote and remote.get('enabled', False):
+            # host: non-empty string
+            host = remote.get('host', '')
+            if not isinstance(host, str) or not host.strip():
+                raise ConfigValidationError(
+                    "remote.host must be a non-empty string."
+                )
+
+            # user: non-empty string
+            user = remote.get('user', '')
+            if not isinstance(user, str) or not user.strip():
+                raise ConfigValidationError(
+                    "remote.user must be a non-empty string."
+                )
+
+            # port: integer 1-65535
+            port = remote.get('port', 22)
+            if not isinstance(port, int) or port < 1 or port > 65535:
+                raise ConfigValidationError(
+                    f"remote.port '{port}' must be an integer 1-65535."
+                )
+
+            # key_file: absolute path if specified
+            key_file = remote.get('key_file')
+            if key_file is not None:
+                if not isinstance(key_file, str) or not key_file.strip():
+                    raise ConfigValidationError(
+                        "remote.key_file must be a non-empty string if specified."
+                    )
+                if not posixpath.isabs(key_file):
+                    raise ConfigValidationError(
+                        f"remote.key_file '{key_file}' must be an absolute path."
+                    )
+
+            # directories: non-empty list of absolute POSIX paths
+            remote_dirs = remote.get('directories', [])
+            if not isinstance(remote_dirs, list) or len(remote_dirs) == 0:
+                raise ConfigValidationError(
+                    "remote.directories must be a non-empty list."
+                )
+            for d in remote_dirs:
+                if not isinstance(d, str) or not posixpath.isabs(d):
+                    raise ConfigValidationError(
+                        f"remote.directories entry '{d}' must be an absolute POSIX path."
+                    )
+
+            # connect_timeout: >= 1
+            connect_timeout = remote.get('connect_timeout', 30)
+            if not isinstance(connect_timeout, (int, float)) or connect_timeout < 1:
+                raise ConfigValidationError(
+                    f"remote.connect_timeout '{connect_timeout}' must be >= 1."
+                )
+
+            # transfer_timeout: >= 60
+            transfer_timeout = remote.get('transfer_timeout', 3600)
+            if not isinstance(transfer_timeout, (int, float)) or transfer_timeout < 60:
+                raise ConfigValidationError(
+                    f"remote.transfer_timeout '{transfer_timeout}' must be >= 60."
+                )
+
     def setup_logging(self):
         """Configure logging"""
         log_file = self.config['daemon']['log_file']
@@ -389,6 +483,11 @@ class VideoConverterDaemon:
         """Handle shutdown signals gracefully"""
         self.logger.info("Received signal %d, shutting down...", signum)
         self.running = False
+        if self._sftp_conn is not None:
+            try:
+                self._sftp_conn.disconnect()
+            except Exception:
+                pass
 
     def get_file_hash(self, file_path: str) -> str:
         """Generate unique hash for file path using SHA-256"""
@@ -427,8 +526,49 @@ class VideoConverterDaemon:
                 continue
         return False
 
-    def discover_videos(self) -> List[Path]:
+    def discover_videos(self) -> List[Union[Path, str]]:
         """Discover video files in configured directories.
+
+        Returns Path objects for local mode, string paths for remote mode.
+        """
+        if self._is_remote_mode():
+            return self._discover_videos_remote()
+        return self._discover_videos_local()
+
+    def _discover_videos_remote(self) -> List[str]:
+        """Discover video files on the remote host via SFTP."""
+        from sftp_ops import sftp_list_videos, validate_remote_path
+
+        remote = self.config['remote']
+        remote_dirs = remote['directories']
+        extensions = self.config['processing']['include_extensions']
+        exclude_patterns = self.config['processing']['exclude_patterns']
+
+        try:
+            self._sftp_conn.ensure_connected()
+            all_videos = sftp_list_videos(
+                self._sftp_conn, remote_dirs, extensions, exclude_patterns
+            )
+
+            # Validate all discovered paths against allowed directories
+            safe_videos = []
+            for video_path in all_videos:
+                if validate_remote_path(video_path, remote_dirs):
+                    safe_videos.append(video_path)
+                else:
+                    self.logger.warning(
+                        "Skipping remote file outside allowed directories: %s",
+                        video_path
+                    )
+
+            self.logger.info("Discovered %d remote video files", len(safe_videos))
+            return safe_videos
+        except Exception as e:
+            self.logger.error("Error discovering remote videos: %s", e)
+            return []
+
+    def _discover_videos_local(self) -> List[Path]:
+        """Discover video files in local configured directories.
 
         Uses a single os.walk() pass per directory instead of separate glob
         calls per extension, reducing filesystem traversals from N*extensions
@@ -509,8 +649,65 @@ class VideoConverterDaemon:
         self.logger.info("Discovered %d total video files", len(all_videos))
         return all_videos
 
-    def should_process(self, video_path: Path) -> bool:
-        """Check if file should be processed"""
+    def should_process(self, video_path: Union[Path, str]) -> bool:
+        """Check if file should be processed.
+
+        Args:
+            video_path: Path object (local mode) or string (remote mode).
+        """
+        if self._is_remote_mode():
+            return self._should_process_remote(str(video_path))
+        return self._should_process_local(Path(video_path))
+
+    def _should_process_remote(self, video_path: str) -> bool:
+        """Check if a remote file should be processed."""
+        from sftp_ops import sftp_exists, sftp_stat, SFTPOperationError
+
+        file_hash = self.get_file_hash(video_path)
+
+        # Skip if already processed
+        if file_hash in self.processed_files:
+            return False
+
+        # Skip if currently converting
+        with self._converting_lock:
+            if file_hash in self.converting:
+                return False
+
+        # Skip if already .m4v
+        _, ext = posixpath.splitext(video_path)
+        if ext.lower() == '.m4v':
+            return False
+
+        # Skip if output already exists on remote
+        output_path = posixpath.splitext(video_path)[0] + '.m4v'
+        try:
+            if output_path != video_path and sftp_exists(self._sftp_conn, output_path):
+                self.logger.debug("Remote output already exists: %s", output_path)
+                return False
+        except Exception as e:
+            self.logger.warning("Error checking remote output %s: %s", output_path, e)
+
+        # Check remote file size
+        try:
+            size, _ = sftp_stat(self._sftp_conn, video_path)
+            if size > MAX_FILE_SIZE_BYTES:
+                self.logger.warning(
+                    "Skipping remote file exceeding size limit (%d bytes): %s",
+                    size, video_path
+                )
+                return False
+            if size == 0:
+                self.logger.warning("Skipping empty remote file: %s", video_path)
+                return False
+        except SFTPOperationError as e:
+            self.logger.warning("Cannot stat remote file %s: %s", video_path, e)
+            return False
+
+        return True
+
+    def _should_process_local(self, video_path: Path) -> bool:
+        """Check if a local file should be processed."""
         file_hash = self.get_file_hash(str(video_path))
 
         # Skip if already processed
@@ -550,14 +747,154 @@ class VideoConverterDaemon:
 
         return True
 
-    def convert_video(self, video_path: Path) -> bool:
-        """Convert a single video file
+    def convert_video(self, video_path: Union[Path, str]) -> bool:
+        """Convert a single video file.
 
         Args:
-            video_path: Path to video file to convert
+            video_path: Path object (local mode) or string (remote mode).
 
         Returns:
-            True if conversion successful, False otherwise
+            True if conversion successful, False otherwise.
+        """
+        if self._is_remote_mode():
+            return self._convert_video_remote(str(video_path))
+        return self._convert_video_local(Path(video_path))
+
+    def _convert_video_remote(self, video_path: str) -> bool:
+        """Convert a remote video: download, convert locally, upload result."""
+        from sftp_ops import (
+            sftp_download, sftp_upload, sftp_delete, sftp_stat,
+            sftp_utime, validate_remote_path, SFTPOperationError,
+        )
+
+        file_hash = self.get_file_hash(video_path)
+        work_dir = Path(self.config['processing']['work_dir'])
+        remote = self.config['remote']
+        transfer_timeout = remote.get('transfer_timeout', 3600)
+        start_time = time.time()
+
+        _, remote_ext = posixpath.splitext(video_path)
+        local_input = work_dir / f"{file_hash}_input{remote_ext}"
+        local_output = work_dir / f"{file_hash}_output.m4v"
+        remote_output = posixpath.splitext(video_path)[0] + '.m4v'
+
+        try:
+            with self._converting_lock:
+                self.converting.add(file_hash)
+
+            self.logger.info("Starting remote conversion: %s", video_path)
+
+            # Dry-run mode
+            if self.dry_run:
+                self.logger.info("[DRY-RUN] Would download: %s", video_path)
+                self.logger.info("[DRY-RUN] Would convert and upload to: %s", remote_output)
+                with self._processed_lock:
+                    self.processed_files.add(file_hash)
+                    self.conversion_times[file_hash] = {
+                        "timestamp": int(start_time),
+                        "duration_seconds": int(time.time() - start_time),
+                        "dry_run": True
+                    }
+                self.save_processed_files()
+                return True
+
+            # Security: Validate remote path
+            if not validate_remote_path(video_path, remote['directories']):
+                self.logger.error("Remote path fails validation: %s", video_path)
+                return False
+
+            # Step 1: Download remote file
+            self.logger.info("Downloading %s", video_path)
+            try:
+                sftp_download(self._sftp_conn, video_path, str(local_input), transfer_timeout)
+            except SFTPOperationError as e:
+                self.logger.error("Download failed for %s: %s", video_path, e)
+                return False
+
+            # Step 2: Convert locally with FFmpeg
+            self.logger.info("Converting %s", posixpath.basename(video_path))
+            ffmpeg_cmd = self.build_ffmpeg_command(local_input, local_output)
+
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=MAX_CONVERSION_TIMEOUT,
+            )
+
+            if result.returncode != 0:
+                stderr_truncated = result.stderr[:2000] if result.stderr else "(no stderr)"
+                self.logger.error(
+                    "Conversion failed for %s: %s", video_path, stderr_truncated
+                )
+                return False
+
+            if not local_output.is_file():
+                self.logger.error("Conversion output is not a regular file: %s", local_output)
+                return False
+
+            # Step 3: Upload converted file
+            self.logger.info("Uploading to %s", remote_output)
+            try:
+                sftp_upload(self._sftp_conn, str(local_output), remote_output, transfer_timeout)
+            except SFTPOperationError as e:
+                self.logger.error("Upload failed for %s: %s", remote_output, e)
+                return False
+
+            # Step 4: Preserve timestamps
+            try:
+                _, mtime = sftp_stat(self._sftp_conn, video_path)
+                sftp_utime(self._sftp_conn, remote_output, (mtime, mtime))
+            except Exception as e:
+                self.logger.warning("Could not preserve remote timestamps: %s", e)
+
+            # Step 5: Optionally delete original
+            if not self.config['processing']['keep_original']:
+                self.logger.info("Deleting remote original: %s", video_path)
+                try:
+                    sftp_delete(self._sftp_conn, video_path)
+                except Exception as e:
+                    self.logger.error("Failed to delete remote original: %s", e)
+
+            # Mark as processed
+            duration = int(time.time() - start_time)
+            with self._processed_lock:
+                self.processed_files.add(file_hash)
+                self.conversion_times[file_hash] = {
+                    "timestamp": int(start_time),
+                    "duration_seconds": duration
+                }
+            self.save_processed_files()
+
+            self.logger.info(
+                "Successfully converted remote file: %s (took %d seconds)",
+                video_path, duration
+            )
+            return True
+
+        except subprocess.TimeoutExpired:
+            self.logger.error(
+                "Conversion timeout (%ds) for %s", MAX_CONVERSION_TIMEOUT, video_path
+            )
+            return False
+        except Exception as e:
+            self.logger.error("Exception converting %s: %s", video_path, e, exc_info=True)
+            return False
+        finally:
+            with self._converting_lock:
+                self.converting.discard(file_hash)
+            # Cleanup local temp files
+            local_input.unlink(missing_ok=True)
+            local_output.unlink(missing_ok=True)
+
+    def _convert_video_local(self, video_path: Path) -> bool:
+        """Convert a single local video file.
+
+        Args:
+            video_path: Path to video file to convert.
+
+        Returns:
+            True if conversion successful, False otherwise.
         """
         file_hash = self.get_file_hash(str(video_path))
         work_dir = Path(self.config['processing']['work_dir'])
@@ -816,6 +1153,13 @@ class VideoConverterDaemon:
             except Exception as e:
                 self.logger.error("Error in main loop: %s", e, exc_info=True)
                 time.sleep(30)
+
+        # Disconnect SFTP on exit
+        if self._sftp_conn is not None:
+            try:
+                self._sftp_conn.disconnect()
+            except Exception:
+                pass
 
         self.logger.info("Video Converter Daemon stopped")
 
